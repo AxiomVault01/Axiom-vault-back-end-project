@@ -16,7 +16,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # =====================
 SECRET_KEY = os.getenv("SECRET_KEY", "unsafe-secret-key")
 
-DEBUG = True
+# DEBUG = True
+DEBUG = os.getenv("DEBUG") == "1"
 
 ALLOWED_HOSTS = ["*"]
 
@@ -29,6 +30,7 @@ AUTH_USER_MODEL = "accounts.User"
 # INSTALLED APPS
 # =====================
 INSTALLED_APPS = [
+    "jazzmin",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -39,12 +41,13 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "drf_spectacular",
-    "django_celery_results",
+    # "django_celery_results",
 
     # Local apps
     "accounts",
     "fraud",
     "ingestion",
+    "django_celery_beat"
 ]
 
 # =====================
@@ -92,12 +95,36 @@ WSGI_APPLICATION = "config.wsgi.application"
 # }
 
 
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.sqlite3",
+#         "NAME": BASE_DIR / "db.sqlite3",
+#     }
+# }
+
+
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': 'mydb',
+#         'USER': 'myuser',
+#         'PASSWORD': 'mypassword',
+#         'HOST': 'db',
+#         'PORT': '5432',
+#     }
+# }
+
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('POSTGRES_DB'),
+        'USER': os.getenv('POSTGRES_USER'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD'),
+        'HOST': os.getenv('DB_HOST', 'db'),
+        'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
+
 # =====================
 # PASSWORD VALIDATION
 # =====================
@@ -119,9 +146,13 @@ USE_TZ = True
 # =====================
 # STATIC FILES
 # =====================
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, "static"),
+]
 
 # =====================
 # DRF + JWT
@@ -152,11 +183,13 @@ SPECTACULAR_SETTINGS = {
 # =====================
 # CELERY + REDIS
 # =====================
-CELERY_BROKER_URL = "redis://127.0.0.1:6379/0"
-CELERY_RESULT_BACKEND = "django-db"
 
-CELERY_ACCEPT_CONTENT = ["json"]
-CELERY_TASK_SERIALIZER = "json"
+CELERY_BROKER_URL = 'redis://redis:6379/0'
+CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
+
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
 
 # =====================
 # CACHE (REDIS)
@@ -164,7 +197,7 @@ CELERY_TASK_SERIALIZER = "json"
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": "redis://127.0.0.1:6379/1",
+        "LOCATION": "redis://redis:6379/1"
     }
 }
 
@@ -176,12 +209,29 @@ EMAIL_HOST = "smtp.gmail.com"
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 
-EMAIL_HOST_USER = "onukwupetrusoge@gmail.com"
-EMAIL_HOST_PASSWORD = "reqo bjfj ukao rzzv"  # NOT your real password
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
 
-DEFAULT_FROM_EMAIL = "AxiomVault <onukwupetrusoge@gmail.com>"
 
 # =====================
 # DEFAULT PRIMARY KEY
 # =====================
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# SETTING UP THE JAZZMIN FOR ADMIN PAGE
+
+JAZZMIN_SETTINGS = {
+    "site_title": "AxiomVault Admin",
+    "site_header": "AxiomVault Control Panel",
+    "site_brand": "AxiomVault",
+    "welcome_sign": "Welcome to AxiomVault 🚀",
+
+    "theme": "darkly",  # try: flatly, cosmo, lumen
+
+    "icons": {
+        "accounts.User": "fas fa-users",
+        "accounts.OTP": "fas fa-key",
+        "accounts.Session": "fas fa-clock",
+    },
+}
