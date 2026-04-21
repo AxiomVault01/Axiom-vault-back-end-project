@@ -1,40 +1,24 @@
 from django.contrib import admin
 from django.urls import path, include
 
-from rest_framework import permissions
-from drf_yasg.views import get_schema_view
-from drf_yasg import openapi
-
-
-schema_view = get_schema_view(
-    openapi.Info(
-        title="AxiomVault API",
-        default_version="v1",
-        description="Secure Data Ingestion & Fraud Detection API",
-        contact=openapi.Contact(email="support@axiomvault.ai"),
-    ),
-    public=True,
-    permission_classes=[permissions.AllowAny],
+from drf_spectacular.views import (
+    SpectacularAPIView,
+    SpectacularSwaggerView,
+    SpectacularRedocView,
 )
 
 urlpatterns = [
     path("admin/", admin.site.urls),
 
-    # API routes
-    path("api/", include("ingestion.urls")),
-    path("api/", include("fraud.urls")),
+    # Auth endpoints
+    path("api/v1/auth/", include("accounts.urls")),
 
-    # Swagger UI
-    path(
-        "swagger/",
-        schema_view.with_ui("swagger", cache_timeout=0),
-        name="swagger-ui",
-    ),
+    # 🔥 Schema
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
 
-    # Redoc (clean documentation view)
-    path(
-        "redoc/",
-        schema_view.with_ui("redoc", cache_timeout=0),
-        name="redoc",
-    ),
+    # 🔥 Swagger UI
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+
+    # 🔥 Redoc
+    path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
 ]

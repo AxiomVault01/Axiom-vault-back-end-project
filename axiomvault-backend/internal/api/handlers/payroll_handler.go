@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"net/http"
-
+	"log"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
@@ -44,12 +44,22 @@ func (h *PayrollHandler) IngestPayroll(c *gin.Context) {
 		req.AmountPaid,
 	)
 
+	// if err != nil {
+	// 	c.JSON(http.StatusInternalServerError, gin.H{
+	// 		"error": "failed to ingest payroll data",
+	// 	})
+	// 	return
+	// }
+
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to ingest payroll data",
-		})
-		return
-	}
+	log.Println("❌ DATABASE ERROR:", err)
+
+	c.JSON(http.StatusInternalServerError, gin.H{
+		"error": err.Error(),
+	})
+	return
+}
+
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "payroll record ingested successfully",
