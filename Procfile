@@ -1,0 +1,1 @@
+web: gunicorn Python-Axiom-backend.wsgi:application
