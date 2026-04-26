@@ -1,8 +1,7 @@
 from rest_framework.routers import DefaultRouter
-from .viewsets import PayrollViewSet, BankAccountViewSet
+from .viewsets import IngestionViewSet
 
 router = DefaultRouter()
-router.register("ingestion/payroll", PayrollViewSet, basename="payroll")
-router.register("ingestion/bank-accounts", BankAccountViewSet, basename="bank-accounts")
+router.register("ingestion", IngestionViewSet, basename="ingestion")
 
 urlpatterns = router.urls
