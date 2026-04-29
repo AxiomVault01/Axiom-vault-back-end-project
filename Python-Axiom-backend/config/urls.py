@@ -13,12 +13,23 @@ urlpatterns = [
     # Auth endpoints
     path("api/v1/auth/", include("accounts.urls")),
 
-    # 🔥 Schema
+    # Ingestion endpoints
+    path("api/v1/ingestion/", include("ingestion.urls")),
+
+    # Schema
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
 
-    # 🔥 Swagger UI
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    # Swagger UI
+    path(
+        "api/docs/",
+        SpectacularSwaggerView.as_view(url_name="schema"),
+        name="swagger-ui",
+    ),
 
-    # 🔥 Redoc
-    path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+    # Redoc
+    path(
+        "api/redoc/",
+        SpectacularRedocView.as_view(url_name="schema"),
+        name="redoc",
+    ),
 ]
