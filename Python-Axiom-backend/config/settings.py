@@ -29,6 +29,28 @@ AUTH_USER_MODEL = "accounts.User"
 # =====================
 # INSTALLED APPS
 # =====================
+# INSTALLED_APPS = [
+#     # "jazzmin",
+#     "django.contrib.admin",
+#     "django.contrib.auth",
+#     "django.contrib.contenttypes",
+#     "django.contrib.sessions",
+#     "django.contrib.messages",
+#     "django.contrib.staticfiles",
+
+#     # Third-party
+#     "rest_framework",
+#     "jazzmin",
+#     "drf_spectacular",
+#     # "django_celery_results",
+
+#     # Local apps
+#     "accounts",
+#     "fraud",
+#     "ingestion",
+#     "django_celery_beat"
+# ]
+
 INSTALLED_APPS = [
     "jazzmin",
     "django.contrib.admin",
@@ -38,17 +60,19 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
 
-    # Third-party
     "rest_framework",
+    "drf_yasg",
     "drf_spectacular",
-    # "django_celery_results",
+    "django_celery_beat",
+
 
     # Local apps
     "accounts",
     "fraud",
     "ingestion",
-    "django_celery_beat"
+
 ]
+
 
 # =====================
 # MIDDLEWARE
