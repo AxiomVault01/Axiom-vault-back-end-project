@@ -1,0 +1,74 @@
+# Sample Render manifest for AxiomVault
+# Adjust names, plans, and secrets as needed in the Render dashboard
+
+services:
+  - type: web
+    name: axiomvault-web
+    env: docker
+    plan: starter
+    dockerfilePath: Dockerfile
+    buildCommand: ''
+    startCommand: ./entrypoint.sh
+    envVars:
+      - key: ENV
+        value: prod
+      - key: SECRET_KEY
+        fromSecret: SECRET_KEY
+      - key: POSTGRES_DB
+        value: mydb
+      - key: POSTGRES_USER
+        value: myuser
+      - key: POSTGRES_PASSWORD
+        fromSecret: POSTGRES_PASSWORD
+      - key: DB_HOST
+        value: ${AWAITING_RENDER_DB_HOST}
+      - key: DB_PORT
+        value: "5432"
+      - key: REDIS_HOST
+        value: ${AWAITING_RENDER_REDIS_HOST}
+      - key: REDIS_PORT
+        value: "6379"
+
+  - type: worker
+    name: axiomvault-worker
+    env: docker
+    plan: starter
+    dockerfilePath: Dockerfile
+    startCommand: ./celery-entrypoint.sh celery -A config.celery worker -l info
+    envVars:
+      - key: ENV
+        value: prod
+      - key: SECRET_KEY
+        fromSecret: SECRET_KEY
+      - key: POSTGRES_DB
+        value: mydb
+      - key: POSTGRES_USER
+        value: myuser
+      - key: POSTGRES_PASSWORD
+        fromSecret: POSTGRES_PASSWORD
+      - key: DB_HOST
+        value: ${AWAITING_RENDER_DB_HOST}
+      - key: DB_PORT
+        value: "5432"
+      - key: REDIS_HOST
+        value: ${AWAITING_RENDER_REDIS_HOST}
+      - key: REDIS_PORT
+        value: "6379"
+
+databases:
+  - name: axiomvault-db
+    plan: starter
+    engine: postgres
+    version: "15"
+
+addons:
+  - type: redis
+    name: axiomvault-redis
+    plan: starter
+
+# Notes:
+# - After creating the managed Postgres and Redis instances on Render, either
+#   set `DB_HOST` / `REDIS_HOST` env vars manually or use the automatically
+#   injected `DATABASE_URL` and `REDIS_URL` values.
+# - Ensure secrets (SECRET_KEY, POSTGRES_PASSWORD) are created in Render and
+#   referenced via `fromSecret` above.

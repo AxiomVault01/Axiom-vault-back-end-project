@@ -2,7 +2,13 @@
 
 echo "⏳ Waiting for Postgres..."
 
-while ! nc -z db 5432; do
+# Allow overriding DB/Redis hosts via environment (Render will set these)
+DB_HOST=${DB_HOST:-db}
+DB_PORT=${DB_PORT:-5432}
+REDIS_HOST=${REDIS_HOST:-redis}
+REDIS_PORT=${REDIS_PORT:-6379}
+
+while ! nc -z "$DB_HOST" "$DB_PORT"; do
   sleep 1
 done
 
@@ -10,7 +16,7 @@ echo "✅ Postgres is ready!"
 
 echo "⏳ Waiting for Redis..."
 
-while ! nc -z redis 6379; do
+while ! nc -z "$REDIS_HOST" "$REDIS_PORT"; do
   sleep 1
 done
 
