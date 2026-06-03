@@ -43,3 +43,12 @@ class Payroll(models.Model):
 
     def __str__(self):
         return f"{self.employee_name} - {self.pay_period}"
+
+class BankAccount(models.Model):
+    # add your fields here
+    account_number = models.CharField(max_length=20)
+    bank_name = models.CharField(max_length=100)
+    # ... other fields
+
+    def __str__(self):
+        return self.account_number

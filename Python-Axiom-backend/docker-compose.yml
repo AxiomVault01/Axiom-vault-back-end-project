@@ -1,6 +1,26 @@
-# version: '3.9'
-
 services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d mydb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   web:
     build: .
     command: /entrypoint.sh
@@ -11,44 +31,35 @@ services:
     env_file:
       - .env
     depends_on:
-      - db
-      - redis
-
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: mydb
-      POSTGRES_USER: myuser
-      POSTGRES_PASSWORD: mypassword
-    # ports:
-      # - "5432:5432"
-
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   celery:
     build: .
     entrypoint: /celery-entrypoint.sh
-    command: celery -A config worker -l info
+    command: celery -A config.celery worker -l info
     volumes:
       - .:/app
-    depends_on:
-      - redis
-      - db
     env_file:
       - .env
-
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   celery-beat:
     build: .
     entrypoint: /celery-entrypoint.sh
-    command: celery -A config beat -l info
+    command: celery -A config.celery beat -l info
     volumes:
       - .:/app
-    depends_on:
-      - redis
-      - db
     env_file:
       - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

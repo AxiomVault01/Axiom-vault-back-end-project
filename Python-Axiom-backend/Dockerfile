@@ -13,7 +13,7 @@ COPY . .
 COPY entrypoint.sh /entrypoint.sh
 COPY celery-entrypoint.sh /celery-entrypoint.sh
 
-RUN chmod +x /entrypoint.sh
-RUN chmod +x /celery-entrypoint.sh
+RUN sed -i 's/\r//' /entrypoint.sh && chmod +x /entrypoint.sh
+RUN sed -i 's/\r//' /celery-entrypoint.sh && chmod +x /celery-entrypoint.sh
 
 CMD ["/entrypoint.sh"]

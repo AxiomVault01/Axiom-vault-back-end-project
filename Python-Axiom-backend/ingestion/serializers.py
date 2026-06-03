@@ -1,11 +1,11 @@
 from rest_framework import serializers
-from .models import BankAccount, PayrollRecord
+from .models import BankAccount, Payroll
 
 
 class PayrollSerializer(serializers.ModelSerializer):
 
     class Meta:
-        model = PayrollRecord
+        model = Payroll
         fields = "__all__"
         read_only_fields = ["id", "created_at"]
 
@@ -15,3 +15,7 @@ class BankAccountSerializer(serializers.ModelSerializer):
         model = BankAccount
         fields = "__all__"
         read_only_fields = ["id", "created_at"]
+
+
+class PayrollUploadSerializer(serializers.Serializer):
+    file = serializers.FileField()
