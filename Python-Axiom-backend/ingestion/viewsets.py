@@ -16,18 +16,7 @@ class IngestionViewSet(viewsets.ViewSet):
 
     @extend_schema(
         tags=["Ingestion"],
-        request={
-            "multipart/form-data": {
-                "type": "object",
-                "properties": {
-                    "file": {
-                        "type": "string",
-                        "format": "binary",
-                    }
-                },
-                "required": ["file"],
-            }
-        },
+        request=PayrollUploadSerializer,
         responses={201: None},
     )
     @action(detail=False, methods=["post"], url_path="upload-payroll")

@@ -12,22 +12,26 @@ services:
     envVars:
       - key: ENV
         value: prod
+      - key: DEBUG
+        value: "False"
       - key: SECRET_KEY
         fromSecret: SECRET_KEY
-      - key: POSTGRES_DB
-        value: mydb
-      - key: POSTGRES_USER
-        value: myuser
-      - key: POSTGRES_PASSWORD
-        fromSecret: POSTGRES_PASSWORD
-      - key: DB_HOST
-        value: ${AWAITING_RENDER_DB_HOST}
-      - key: DB_PORT
-        value: "5432"
-      - key: REDIS_HOST
-        value: ${AWAITING_RENDER_REDIS_HOST}
-      - key: REDIS_PORT
-        value: "6379"
+      - key: DATABASE_URL
+        fromSecret: DATABASE_URL
+      - key: REDIS_URL
+        fromSecret: REDIS_URL
+      - key: EMAIL_HOST_USER
+        value: onukwupetrusoge@gmail.com
+      - key: EMAIL_HOST_PASSWORD
+        fromSecret: EMAIL_HOST_PASSWORD
+      - key: DEFAULT_FROM_EMAIL
+        value: onukwupetrusoge@gmail.com
+      - key: DJANGO_SUPERUSER_USERNAME
+        value: admin
+      - key: DJANGO_SUPERUSER_EMAIL
+        value: admin@example.com
+      - key: DJANGO_SUPERUSER_PASSWORD
+        fromSecret: DJANGO_SUPERUSER_PASSWORD
 
   - type: worker
     name: axiomvault-worker
@@ -38,22 +42,26 @@ services:
     envVars:
       - key: ENV
         value: prod
+      - key: DEBUG
+        value: "False"
       - key: SECRET_KEY
         fromSecret: SECRET_KEY
-      - key: POSTGRES_DB
-        value: mydb
-      - key: POSTGRES_USER
-        value: myuser
-      - key: POSTGRES_PASSWORD
-        fromSecret: POSTGRES_PASSWORD
-      - key: DB_HOST
-        value: ${AWAITING_RENDER_DB_HOST}
-      - key: DB_PORT
-        value: "5432"
-      - key: REDIS_HOST
-        value: ${AWAITING_RENDER_REDIS_HOST}
-      - key: REDIS_PORT
-        value: "6379"
+      - key: DATABASE_URL
+        fromSecret: DATABASE_URL
+      - key: REDIS_URL
+        fromSecret: REDIS_URL
+      - key: EMAIL_HOST_USER
+        value: onukwupetrusoge@gmail.com
+      - key: EMAIL_HOST_PASSWORD
+        fromSecret: EMAIL_HOST_PASSWORD
+      - key: DEFAULT_FROM_EMAIL
+        value: onukwupetrusoge@gmail.com
+      - key: DJANGO_SUPERUSER_USERNAME
+        value: admin
+      - key: DJANGO_SUPERUSER_EMAIL
+        value: admin@example.com
+      - key: DJANGO_SUPERUSER_PASSWORD
+        fromSecret: DJANGO_SUPERUSER_PASSWORD
 
 databases:
   - name: axiomvault-db
@@ -67,8 +75,8 @@ addons:
     plan: starter
 
 # Notes:
-# - After creating the managed Postgres and Redis instances on Render, either
-#   set `DB_HOST` / `REDIS_HOST` env vars manually or use the automatically
-#   injected `DATABASE_URL` and `REDIS_URL` values.
-# - Ensure secrets (SECRET_KEY, POSTGRES_PASSWORD) are created in Render and
-#   referenced via `fromSecret` above.
+# - After creating the managed Postgres and Redis instances on Render, set
+#   `DATABASE_URL` and `REDIS_URL` values in the Render dashboard or create
+#   secrets for them and reference them via `fromSecret`.
+# - Ensure secrets (SECRET_KEY, EMAIL_HOST_PASSWORD, DJANGO_SUPERUSER_PASSWORD)
+#   are created on Render and referenced in this manifest.

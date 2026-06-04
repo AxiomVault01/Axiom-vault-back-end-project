@@ -18,4 +18,7 @@ class BankAccountSerializer(serializers.ModelSerializer):
 
 
 class PayrollUploadSerializer(serializers.Serializer):
-    file = serializers.FileField()
+    file = serializers.FileField(
+        help_text="CSV file for payroll data",
+        label="Payroll CSV File"
+    )
