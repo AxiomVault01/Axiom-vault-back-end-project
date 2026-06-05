@@ -9,7 +9,7 @@ REDIS_HOST=${REDIS_HOST:-redis}
 REDIS_PORT=${REDIS_PORT:-6379}
 
 if [ -n "$DATABASE_URL" ]; then
-  DB_HOST=${DB_HOST:-$(python - <<'PY'
+  DB_HOST=$(python - <<'PY'
 import os
 from urllib.parse import urlparse
 url = os.getenv('DATABASE_URL', '')
@@ -18,8 +18,8 @@ if url:
     if u.hostname:
         print(u.hostname)
 PY
-)}
-  DB_PORT=${DB_PORT:-$(python - <<'PY'
+)
+  DB_PORT=$(python - <<'PY'
 import os
 from urllib.parse import urlparse
 url = os.getenv('DATABASE_URL', '')
@@ -28,11 +28,11 @@ if url:
     if u.port:
         print(u.port)
 PY
-)}
+)
 fi
 
 if [ -n "$REDIS_URL" ]; then
-  REDIS_HOST=${REDIS_HOST:-$(python - <<'PY'
+  REDIS_HOST=$(python - <<'PY'
 import os
 from urllib.parse import urlparse
 url = os.getenv('REDIS_URL', '')
@@ -41,8 +41,8 @@ if url:
     if u.hostname:
         print(u.hostname)
 PY
-)}
-  REDIS_PORT=${REDIS_PORT:-$(python - <<'PY'
+)
+  REDIS_PORT=$(python - <<'PY'
 import os
 from urllib.parse import urlparse
 url = os.getenv('REDIS_URL', '')
@@ -51,7 +51,7 @@ if url:
     if u.port:
         print(u.port)
 PY
-)}
+)
 fi
 
 DB_PORT=${DB_PORT:-5432}
