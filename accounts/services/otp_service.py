@@ -1,6 +1,7 @@
 import random
-from datetime import timedelta
+
 from django.utils import timezone
+from datetime import timedelta
 
 from accounts.models import OTP
 from accounts.tasks import send_otp_email_task
@@ -9,54 +10,45 @@ from accounts.tasks import send_otp_email_task
 class OTPService:
 
     @staticmethod
-    def generate(user, otp_type="signup"):
-        code = str(random.randint(1000, 9999))
+    def generate(email):
 
-        # ✅ Invalidate old OTPs
         OTP.objects.filter(
-            user=user,
-            type=otp_type,
+            email=email,
             is_used=False
-        ).update(is_used=True)
+        ).delete()
 
-        # ✅ Create new OTP
-        OTP.objects.create(
-            user=user,
+        code = str(random.randint(100000, 999999))
+
+        otp = OTP.objects.create(
+            email=email,
             code=code,
-            type=otp_type,
-            expires_at=timezone.now() + timedelta(minutes=5),
+            expires_at=timezone.now() + timedelta(minutes=2)
         )
 
-        # ✅ Send asynchronously
-        send_otp_email_task.delay(user.email, code)
+        send_otp_email_task.delay(
+            email=email,
+            code=code
+        )
 
-        return code
+        return otp
 
-    @staticmethod
-    def verify(user, code, otp_type):
-        otp = OTP.objects.filter(
-            user=user,
-            code=code,
-            type=otp_type,
-            is_used=False
-        ).last()
+        @staticmethod
+    def verify(email, code):
 
-        if not otp:
+        try:
+            otp = OTP.objects.filter(
+                email=email,
+                code=code,
+                is_used=False
+            ).latest("created_at")
+
+        except OTP.DoesNotExist:
             return False, "Invalid OTP"
 
-        if otp.attempt_count >= 5:
-            return False, "Too many attempts"
+        if otp.is_expired:
+            return False, "OTP expired"
 
-        if otp.expires_at < timezone.now():
-            return False, "Expired OTP"
-
-        # ✅ increment attempts
-        otp.attempt_count += 1
-
-        # ✅ mark used if correct
-        if otp.code == code:
-            otp.is_used = True
-
+        otp.is_used = True
         otp.save()
 
         return True, None

@@ -10,26 +10,37 @@ from drf_spectacular.views import (
 urlpatterns = [
     path("admin/", admin.site.urls),
 
-    # Auth endpoints
+    # Authentication
     path("api/v1/auth/", include("accounts.urls")),
 
-    # Ingestion endpoints
+    # Fraud Detection
+    path("api/v1/fraud/", include("fraud.urls")),
+
+    # Ingestion
     path("api/v1/ingestion/", include("ingestion.urls")),
 
-    # Schema
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    # OpenAPI Schema
+    path(
+        "api/schema/",
+        SpectacularAPIView.as_view(),
+        name="schema"
+    ),
 
     # Swagger UI
     path(
         "api/docs/",
-        SpectacularSwaggerView.as_view(url_name="schema"),
+        SpectacularSwaggerView.as_view(
+            url_name="schema"
+        ),
         name="swagger-ui",
     ),
 
-    # Redoc
+    # ReDoc
     path(
         "api/redoc/",
-        SpectacularRedocView.as_view(url_name="schema"),
+        SpectacularRedocView.as_view(
+            url_name="schema"
+        ),
         name="redoc",
     ),
 ]

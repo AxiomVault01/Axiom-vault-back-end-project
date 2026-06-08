@@ -29,24 +29,74 @@ class User(AbstractUser):
         return self.email
 
 
-# ✅ ADD THIS
+# ✅ OTP MODEL
+from django.db import models
+from django.utils import timezone
+from datetime import timedelta
+import uuid
+
+
+import uuid
+from datetime import timedelta
+
+from django.db import models
+from django.utils import timezone
+
+
 class OTP(models.Model):
 
-    TYPE_CHOICES = [
-        ("signup", "Signup"),
-        ("reset", "Password Reset"),
-    ]
+    PURPOSE_CHOICES = (
+        ("verification", "Email Verification"),
+        ("login", "Login"),
+        ("password_reset", "Password Reset"),
+    )
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
 
-    code = models.CharField(max_length=4)
-    type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    email = models.EmailField(
+        db_index=True
+    )
+
+    code = models.CharField(
+        max_length=6,
+        db_index=True
+    )
+
+    purpose = models.CharField(
+        max_length=50,
+        choices=PURPOSE_CHOICES,
+        default="verification",
+    )
 
     is_used = models.BooleanField(default=False)
-    attempt_count = models.IntegerField(default=0)
 
     expires_at = models.DateTimeField()
-    created_at = models.DateTimeField(auto_now_add=True)
 
-    def __str__(self):
-        return f"{self.user.email} - {self.code}"
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        db_table = "otp_codes"
+        ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(minutes=2)
+
+        super().save(*args, **kwargs)
+
+    @property
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_valid(self):
+        return (
+            not self.is_used
+            and not self.is_expired
+        )
