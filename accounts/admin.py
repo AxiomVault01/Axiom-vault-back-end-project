@@ -12,6 +12,9 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(OTP)
 class OTPAdmin(admin.ModelAdmin):
-    list_display = ("user", "code", "type", "is_used", "expires_at")
-    search_fields = ("user__email", "code")
-    list_filter = ("type", "is_used")
+    list_display = ("email", "code", "purpose", "is_used", "expires_at")
+    search_fields = ("email", "code")
+    # Change "type" to "purpose"
+    list_filter = ("purpose", "is_used")  
+
+

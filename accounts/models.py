@@ -86,7 +86,7 @@ class OTP(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.expires_at:
-            self.expires_at = timezone.now() + timedelta(minutes=2)
+            self.expires_at = timezone.now() + timedelta(minutes=5)
 
         super().save(*args, **kwargs)
 

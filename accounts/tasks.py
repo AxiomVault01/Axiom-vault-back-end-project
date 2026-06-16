@@ -3,37 +3,25 @@ from django.core.mail import send_mail
 from django.conf import settings
 
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=5, retry_kwargs={"max_retries": 3})
+@shared_task(bind=True)
 def send_otp_email_task(self, email, code):
-    """
-    Sends OTP email asynchronously.
-    Retries automatically if email fails.
-    """
-
-    subject = "Your AxiomVault Verification Code"
-
-    message = f"""
-Hello,
-
-Your One-Time Password (OTP) is: {code}
-
-This code will expire in 5 minutes.
-
-If you did not request this, please ignore this email.
-
-— AxiomVault Security Team
-"""
+    print(f"EMAIL TASK STARTED -> {email}")
+    print(f"OTP -> {code}")
 
     try:
-        send_mail(
-            subject=subject,
-            message=message,
+        result = send_mail(
+            subject="Your AxiomVault Verification Code",
+            message=f"Your OTP is {code}",
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
             fail_silently=False,
         )
 
-        return f"OTP sent to {email}"
+        print(f"SEND_MAIL RESULT -> {result}")
+        print(f"EMAIL SENT -> {email}")
 
     except Exception as e:
-        raise self.retry(exc=e)
+        print(f"EMAIL ERROR -> {str(e)}")
+        raise
+
+    return True

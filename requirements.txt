@@ -4,7 +4,6 @@ djangorestframework==3.16.1
 django-filter==25.1
 djangorestframework-simplejwt==5.5.1
 django-redis
-drf-yasg==1.21.10
 dj-database-url==3.0.1
 gunicorn==23.0.0
 whitenoise==6.9.0

@@ -1,110 +1,103 @@
-# =====================
-# SEND OTP
-# =====================
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+from drf_spectacular.utils import extend_schema
+from django.contrib.auth import get_user_model
+from .services import OTPService, AuthService
 
-@extend_schema(
-    request=SendOTPSerializer,
-    tags=["Auth"]
+# from .services import OTPService, AuthService  
+from .serializers import (
+    SendOTPSerializer,
+    VerifyOTPSerializer,
+    ResendOTPSerializer,
+    SignupSerializer,
+    LoginSerializer,
+    ResetPasswordSerializer
 )
-@action(
-    detail=False,
-    methods=["post"],
-    url_path="send-otp"
-)
-def send_otp(self, request):
 
-    serializer = SendOTPSerializer(
-        data=request.data
-    )
+User = get_user_model()
 
-    serializer.is_valid(
-        raise_exception=True
-    )
+class AuthViewSet(viewsets.ViewSet):
 
-    OTPService.generate(
-        serializer.validated_data["email"]
-    )
+    serializer_class = SendOTPSerializer 
+    """Unified ViewSet routing requests straight to dedicated service engines."""
 
-    return Response(
-        {
-            "message": "OTP sent successfully"
-        },
-        status=status.HTTP_200_OK
-    )
+    @extend_schema(request=SendOTPSerializer, tags=["Auth"])
+    def send_otp(self, request):
+        serializer = SendOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        OTPService.generate(serializer.validated_data["email"], purpose="verification")
+        return Response({"message": "OTP verification code transmitted successfully."}, status=status.HTTP_200_OK)
 
+    @extend_schema(request=VerifyOTPSerializer, tags=["Auth"])
+    def verify_otp(self, request):
+        serializer = VerifyOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        valid, error = OTPService.verify(
+            serializer.validated_data["email"], 
+            serializer.validated_data["code"],
+            purpose="verification"
+        )
+        if not valid:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+            
+        User.objects.filter(email=serializer.validated_data["email"]).update(is_verified=True)
+        return Response({"message": "OTP validation verified successfully."}, status=status.HTTP_200_OK)
 
-# =====================
-# VERIFY OTP
-# =====================
+    @extend_schema(request=ResendOTPSerializer, tags=["Auth"])
+    def resend_otp(self, request):
+        serializer = ResendOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        OTPService.generate(serializer.validated_data["email"], purpose="verification")
+        return Response({"message": "A fresh OTP code has been issued."}, status=status.HTTP_200_OK)
 
-@extend_schema(
-    request=VerifyOTPSerializer,
-    tags=["Auth"]
-)
-@action(
-    detail=False,
-    methods=["post"],
-    url_path="verify-otp"
-)
-def verify_otp(self, request):
-
-    serializer = VerifyOTPSerializer(
-        data=request.data
-    )
-
-    serializer.is_valid(
-        raise_exception=True
-    )
-
-    valid, error = OTPService.verify(
-        serializer.validated_data["email"],
-        serializer.validated_data["code"]
-    )
-
-    if not valid:
+    @extend_schema(request=SignupSerializer, tags=["Auth"])
+    def signup(self, request):
+        serializer = SignupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        AuthService.signup(serializer.validated_data)
         return Response(
-            {"error": error},
-            status=status.HTTP_400_BAD_REQUEST
+            {"message": "Account created successfully. A verification code has been dispatched."},
+            status=status.HTTP_201_CREATED
         )
 
-    return Response(
-        {
-            "message": "OTP verified"
-        },
-        status=status.HTTP_200_OK
-    )
+    @extend_schema(request=LoginSerializer, tags=["Auth"])
+    def login(self, request):
+        serializer = LoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
+        AuthService.login(
+            request, 
+            email=serializer.validated_data["email"], 
+            password=serializer.validated_data["password"]
+        )
+        return Response({"message": "Authentication successful."}, status=status.HTTP_200_OK)
 
-# =====================
-# RESEND OTP
-# =====================
+    @extend_schema(request=SendOTPSerializer, tags=["Auth"])
+    def forgot_password(self, request):
+        serializer = SendOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-@extend_schema(
-    request=ResendOTPSerializer,
-    tags=["Auth"]
-)
-@action(
-    detail=False,
-    methods=["post"],
-    url_path="resend-otp"
-)
-def resend_otp(self, request):
+        if AuthService.forgot_password(serializer.validated_data["email"]):
+            return Response({"message": "Password modification code dispatched."}, status=status.HTTP_200_OK)
+        return Response({"error": "No account tied to this email address."}, status=status.HTTP_404_NOT_FOUND)
 
-    serializer = ResendOTPSerializer(
-        data=request.data
-    )
+    @extend_schema(request=ResetPasswordSerializer, tags=["Auth"])
+    def reset_password(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-    serializer.is_valid(
-        raise_exception=True
-    )
+        AuthService.reset_password(
+            email=serializer.validated_data["email"],
+            code=serializer.validated_data["otp_code"],
+            new_password=serializer.validated_data["new_password"]
+        )
+        return Response({"message": "Password altered successfully."}, status=status.HTTP_200_OK)
 
-    OTPService.generate(
-        serializer.validated_data["email"]
-    )
-
-    return Response(
-        {
-            "message": "OTP resent successfully"
-        },
-        status=status.HTTP_200_OK
-    )
+    @extend_schema(responses={200: dict}, tags=["Auth"])
+    def logout(self, request):
+        AuthService.logout(request)
+        return Response({"message": "Session closed safely."}, status=status.HTTP_200_OK)
