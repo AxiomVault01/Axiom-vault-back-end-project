@@ -54,6 +54,9 @@ AUTH_USER_MODEL = "accounts.User"
 # ]
 
 INSTALLED_APPS = [
+    "corsheaders",
+
+
     "jazzmin",
     "django.contrib.admin",
     "django.contrib.auth",
@@ -80,6 +83,10 @@ INSTALLED_APPS = [
 # MIDDLEWARE
 # =====================
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
+
+
+
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -213,6 +220,15 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+
+CORS_ALLOW_CREDENTIALS = True
 
 # =====================
 # SWAGGER (SPECTACULAR)

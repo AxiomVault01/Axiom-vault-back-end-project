@@ -6,3 +6,8 @@ db.sqlite3
 .git
 .gitignore
 node_modules/
+
+**/.venv/
+**/.venv/**
+.venv/
+venv/
