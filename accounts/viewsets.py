@@ -4,6 +4,10 @@ from drf_spectacular.utils import extend_schema
 from django.contrib.auth import get_user_model
 from .services import OTPService, AuthService
 
+# 👇 ADD THIS EXACT IMPORT AT THE TOP OF YOUR VIEWS.PY FILE
+from django.conf import settings
+
+
 # from .services import OTPService, AuthService  
 from .serializers import (
     SendOTPSerializer,
@@ -28,7 +32,7 @@ class AuthViewSet(viewsets.ViewSet):
         
         email = serializer.validated_data["email"]
 
-        if DEBUG:
+        if settings.DEBUG:
             # 🧪 Running locally? Execute it directly and synchronously
             OTPService.generate(email, purpose="verification")
         else:
