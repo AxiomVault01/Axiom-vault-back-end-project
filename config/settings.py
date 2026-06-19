@@ -235,6 +235,9 @@ CORS_ALLOW_CREDENTIALS = True
 # =====================
 # SWAGGER (SPECTACULAR)
 # =====================
+# =====================
+# SWAGGER (SPECTACULAR)
+# =====================
 SPECTACULAR_SETTINGS = {
     "TITLE": "AxiomVault API",
     "DESCRIPTION": "Fraud Detection Backend System",
@@ -242,7 +245,8 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
     "SERVERS": [
         {"url": "http://localhost:8000", "description": "Local Development"},
-        {"url": "https://onrender.com", "description": "Production Server"}, # 👈 Add your Render URL here
+        # 👇 UPDATE THIS LINE TO YOUR EXACT LIVE RENDER ADDRESS BELOW
+        {"url": "https://axiom-vault-back-end-project-t9fx.onrender.com", "description": "Production Server"},
     ],
 }
 
