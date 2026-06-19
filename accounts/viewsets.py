@@ -16,6 +16,11 @@ from .serializers import (
 
 User = get_user_model()
 
+class AuthViewSet(viewsets.ViewSet):
+
+    serializer_class = SendOTPSerializer 
+    """Unified ViewSet routing requests straight to dedicated service engines."""
+
     @extend_schema(request=SendOTPSerializer, tags=["Auth"])
     def send_otp(self, request):
         serializer = SendOTPSerializer(data=request.data)
