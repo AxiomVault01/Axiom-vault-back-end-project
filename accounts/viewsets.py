@@ -16,17 +16,21 @@ from .serializers import (
 
 User = get_user_model()
 
-class AuthViewSet(viewsets.ViewSet):
-
-    serializer_class = SendOTPSerializer 
-    """Unified ViewSet routing requests straight to dedicated service engines."""
-
     @extend_schema(request=SendOTPSerializer, tags=["Auth"])
     def send_otp(self, request):
         serializer = SendOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        OTPService.generate(serializer.validated_data["email"], purpose="verification")
+        email = serializer.validated_data["email"]
+
+        if DEBUG:
+            # 🧪 Running locally? Execute it directly and synchronously
+            OTPService.generate(email, purpose="verification")
+        else:
+            # 🚀 Running live on Render? Dispatch it safely to your Celery background tasks
+            # Replace 'generate_otp_task' with the exact name of your project's Celery task
+            generate_otp_task.delay(email, purpose="verification")
+
         return Response({"message": "OTP verification code transmitted successfully."}, status=status.HTTP_200_OK)
 
     @extend_schema(request=VerifyOTPSerializer, tags=["Auth"])

@@ -4,6 +4,10 @@ from datetime import timedelta
 from dotenv import load_dotenv
 import dj_database_url
 
+# Place this inside your settings.py file
+APPEND_SLASH = True
+
+
 # =====================
 # LOAD ENV
 # =====================
