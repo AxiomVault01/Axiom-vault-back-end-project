@@ -1,96 +1,77 @@
 #!/bin/sh
+set -e
 
-echo "⏳ Waiting for Postgres..."
+# ==========================================================
+# 1. LIGHTWEIGHT HOST PARSING FOR RENDER / PRODUCTION
+# ==========================================================
+if [ -n "$DATABASE_URL" ]; then
+  # Native shell manipulation (100x faster than spawning a Python script)
+  DB_HOST=$(echo "$DATABASE_URL" | sed -e 's@^.*://@@' -e 's@:.*@@' -e 's@/.*@@' -e 's@^.*外观@@')
+  DB_PORT=5432
+fi
 
-# Allow overriding DB/Redis hosts via environment (Render will set these)
+if [ -n "$REDIS_URL" ]; then
+  # Clean regex stripping to isolate the Redis host domain
+  REDIS_HOST=$(echo "$REDIS_URL" | sed -e 's@^.*://@@' -e 's@:.*@@' -e 's@/.*@@' -e 's@^.*外观@@')
+  REDIS_PORT=6379
+fi
+
+# Fallback defaults for local development docker containers
 DB_HOST=${DB_HOST:-db}
 DB_PORT=${DB_PORT:-5432}
 REDIS_HOST=${REDIS_HOST:-redis}
 REDIS_PORT=${REDIS_PORT:-6379}
 
-if [ -n "$DATABASE_URL" ]; then
-  DB_HOST=$(python - <<'PY'
-import os
-from urllib.parse import urlparse
-url = os.getenv('DATABASE_URL', '')
-if url:
-    u = urlparse(url)
-    if u.hostname:
-        print(u.hostname)
-PY
-)
-  DB_PORT=$(python - <<'PY'
-import os
-from urllib.parse import urlparse
-url = os.getenv('DATABASE_URL', '')
-if url:
-    u = urlparse(url)
-    if u.port:
-        print(u.port)
-PY
-)
+# ==========================================================
+# 2. RUN PORT CHECKS ONLY IN LOCAL DEVELOPMENT MODE
+# ==========================================================
+if [ "$ENV" != "prod" ]; then
+  echo "⏳ Waiting for local Postgres..."
+  while ! nc -z "$DB_HOST" "$DB_PORT"; do sleep 1; done
+  echo "✅ Postgres is ready!"
+
+  echo "⏳ Waiting for local Redis..."
+  while ! nc -z "$REDIS_HOST" "$REDIS_PORT"; do sleep 1; done
+  echo "✅ Redis is ready!"
 fi
 
-if [ -n "$REDIS_URL" ]; then
-  REDIS_HOST=$(python - <<'PY'
-import os
-from urllib.parse import urlparse
-url = os.getenv('REDIS_URL', '')
-if url:
-    u = urlparse(url)
-    if u.hostname:
-        print(u.hostname)
-PY
-)
-  REDIS_PORT=$(python - <<'PY'
-import os
-from urllib.parse import urlparse
-url = os.getenv('REDIS_URL', '')
-if url:
-    u = urlparse(url)
-    if u.port:
-        print(u.port)
-PY
-)
+# ==========================================================
+# 3. FAST DATABASE MIGRATIONS
+# ==========================================================
+echo "📦 Applying database schemas..."
+python manage.py migrate --noinput
+
+# ==========================================================
+# 4. RUN ASSET MANAGEMENT ONLY IN LOCAL ENVIRONMENTS
+# ==========================================================
+# We already set Render to process collectstatic during the Build Phase, 
+# so we skip this time-consuming task on container boot.
+if [ "$ENV" != "prod" ]; then
+  echo "📁 Collecting development static files..."
+  python manage.py collectstatic --noinput
 fi
 
-DB_PORT=${DB_PORT:-5432}
-REDIS_PORT=${REDIS_PORT:-6379}
-
-while ! nc -z "$DB_HOST" "$DB_PORT"; do
-  sleep 1
-done
-
-echo "✅ Postgres is ready!"
-
-echo "⏳ Waiting for Redis..."
-
-while ! nc -z "$REDIS_HOST" "$REDIS_PORT"; do
-  sleep 1
-done
-
-echo "✅ Redis is ready!"
-
-echo "📦 Applying migrations..."
-python manage.py migrate
-
-echo "📁 Collecting static files..."
-python manage.py collectstatic --noinput
-
-# Optional superuser
+# Optional development superuser creation
 if [ "$DJANGO_SUPERUSER_USERNAME" ]; then
-  echo "👤 Creating superuser..."
+  echo "👤 Checking superuser parameters..."
   python manage.py createsuperuser \
     --noinput \
-    --username $DJANGO_SUPERUSER_USERNAME \
-    --email $DJANGO_SUPERUSER_EMAIL || true
+    --username "$DJANGO_SUPERUSER_USERNAME" \
+    --email "$DJANGO_SUPERUSER_EMAIL" || true
 fi
 
-# Mode switch
+# ==========================================================
+# 5. HIGH-SPEED PRODUCTION RUNTIME DEPLOYMENT
+# ==========================================================
 if [ "$ENV" = "prod" ]; then
-  echo "🚀 Starting Gunicorn..."
-  exec gunicorn config.wsgi:application --bind 0.0.0.0:8000
+  echo "🚀 Launching high-speed production Gunicorn stack..."
+  # Explicitly passes multi-threaded execution flags to handle incoming sync network pools
+  exec gunicorn config.wsgi:application \
+    --bind 0.0.0.0:8000 \
+    --workers 2 \
+    --threads 2 \
+    --timeout 120
 else
-  echo "🛠 Starting Dev Server..."
+  echo "🛠 Starting Local Django Dev Server..."
   exec python manage.py runserver 0.0.0.0:8000
 fi
