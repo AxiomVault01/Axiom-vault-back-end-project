@@ -19,7 +19,9 @@ SECRET_KEY = os.getenv("SECRET_KEY", "unsafe-secret-key")
 # DEBUG = True
 # DEBUG = os.getenv("DEBUG") == "1"
 
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+# DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG = os.getenv("DEBUG", "False").strip().lower() in ("true", "1")
+
 
 ALLOWED_HOSTS = ["*"]
 
@@ -224,8 +226,8 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "https://onrender.com", # 👈 Add your live frontend domain when ready
 ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -238,6 +240,10 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Fraud Detection Backend System",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    "SERVERS": [
+        {"url": "http://localhost:8000", "description": "Local Development"},
+        {"url": "https://onrender.com", "description": "Production Server"}, # 👈 Add your Render URL here
+    ],
 }
 
 # =====================
