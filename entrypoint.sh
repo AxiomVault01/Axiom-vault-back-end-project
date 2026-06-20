@@ -64,10 +64,14 @@ fi
 # 5. HIGH-SPEED PRODUCTION RUNTIME DEPLOYMENT
 # ==========================================================
 if [ "$ENV" = "prod" ]; then
+  echo "🚀 Launching background Celery worker..."
+  # The ampersand (&) forces Celery to fork to the background so the script can continue
+  celery -A config worker --loglevel=info &
+
   echo "🚀 Launching high-speed production Gunicorn stack..."
-  # Explicitly passes multi-threaded execution flags to handle incoming sync network pools
+  # Uses Render's dynamic environment port definition variable to handle incoming sync network pools
   exec gunicorn config.wsgi:application \
-    --bind 0.0.0.0:8000 \
+    --bind 0.0.0.0:$PORT \
     --workers 2 \
     --threads 2 \
     --timeout 120
