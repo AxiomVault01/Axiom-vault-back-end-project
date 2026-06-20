@@ -5,14 +5,14 @@ set -e
 # 1. LIGHTWEIGHT HOST PARSING FOR RENDER / PRODUCTION
 # ==========================================================
 if [ -n "$DATABASE_URL" ]; then
-  # Native shell manipulation (100x faster than spawning a Python script)
-  DB_HOST=$(echo "$DATABASE_URL" | sed -e 's@^.*://@@' -e 's@:.*@@' -e 's@/.*@@' -e 's@^.*外观@@')
+  # Strips everything up to the '@' and everything after the ':' or '/'
+  DB_HOST=$(echo "$DATABASE_URL" | sed -e 's|^.*//||' -e 's|^.*@||' -e 's|:.*||' -e 's|/.*||')
   DB_PORT=5432
 fi
 
 if [ -n "$REDIS_URL" ]; then
-  # Clean regex stripping to isolate the Redis host domain
-  REDIS_HOST=$(echo "$REDIS_URL" | sed -e 's@^.*://@@' -e 's@:.*@@' -e 's@/.*@@' -e 's@^.*外观@@')
+  # Strips everything up to the protocol and isolates the host domain
+  REDIS_HOST=$(echo "$REDIS_URL" | sed -e 's|^.*//||' -e 's|^.*@||' -e 's|:.*||' -e 's|/.*||')
   REDIS_PORT=6379
 fi
 
