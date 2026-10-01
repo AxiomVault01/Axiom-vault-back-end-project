@@ -1,4 +1,5 @@
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema, inline_serializer
@@ -11,6 +12,9 @@ from .services import (
     INVALID_CREDENTIALS_MESSAGE,
     DELIVERY_FAILED_MESSAGE,
     INCORRECT_CODE_MESSAGE,
+    LOGOUT_SUCCESS_MESSAGE,
+    LOGOUT_TOKEN_INVALID_MESSAGE,
+    LOGOUT_WRONG_ACCOUNT_MESSAGE,
     MAX_CODE_ATTEMPTS,
     NO_ACTIVE_CODE_MESSAGE,
     SESSION_EXPIRED_MESSAGE,
@@ -28,6 +32,7 @@ from .serializers import (
     ResendOTPSerializer,
     SignupSerializer,
     LoginSerializer,
+    LogoutSerializer,
     RefreshTokenSerializer,
     ResetPasswordSerializer
 )
@@ -141,6 +146,12 @@ class AuthViewSet(viewsets.ViewSet):
         if getattr(self, "action", None) in self.AUTHENTICATED_ACTIONS:
             return super().get_authenticators()
         return []
+
+    def get_permissions(self):
+        # Logged-in actions answer 401 without a valid access token; the rest stay open.
+        if getattr(self, "action", None) in self.AUTHENTICATED_ACTIONS:
+            return [IsAuthenticated()]
+        return super().get_permissions()
 
     @extend_schema(
         tags=["Auth"],
@@ -472,7 +483,8 @@ class AuthViewSet(viewsets.ViewSet):
             "- `400`: `refresh` is missing or empty. This is a frontend bug, not an expired session.\n"
             "- `401`: the refresh token is expired, invalid, an access token instead of a refresh token, "
             "or belongs to an account that was deactivated or deleted. The message is the same in every "
-            "case. Clear both stored tokens and send the user to the Sign In screen.\n\n"
+            "case. A refresh token that was used to log out (`POST /api/v1/auth/logout/`) also gets this "
+            "`401`. Clear both stored tokens and send the user to the Sign In screen.\n\n"
             "**Authentication:** none. Do not send the expired access token; any `Authorization` header "
             "is ignored."
         ),
@@ -538,7 +550,89 @@ class AuthViewSet(viewsets.ViewSet):
         )
         return Response({"message": "Password altered successfully."}, status=status.HTTP_200_OK)
 
-    @extend_schema(responses={200: dict}, tags=["Auth"])
+    @extend_schema(
+        tags=["Auth"],
+        summary="Log out and block the refresh token",
+        description=(
+            "**Log out button.** Ends the session by adding the refresh token to the server's blacklist. "
+            "After this, the refresh token can never be used again: `POST /api/v1/auth/token/refresh/` "
+            "answers `401` for it.\n\n"
+            "**Authentication:** required. Send the current access token as "
+            "`Authorization: Bearer <access>`. If the access token has expired, call "
+            "`token/refresh/` first, then log out with the new access token.\n\n"
+            "**Request fields**\n"
+            "- `refresh` (required): the `refresh` token returned by `POST /api/v1/auth/login/` for this "
+            "same account.\n\n"
+            "**What the frontend should do**\n"
+            "- Delete **both** stored tokens after the call, whatever the response. The access token is "
+            "not blocked by the server; it simply stops working when it expires (at most 30 minutes), "
+            "so the frontend must forget it.\n\n"
+            "**Responses**\n"
+            "- `200`: logged out; the refresh token is blocked. Go to the Sign In screen.\n"
+            "- `400`: `refresh` is missing or empty, or the refresh token is expired, invalid, an access "
+            "token, or was already used to log out. The session is already over; clear the tokens and "
+            "go to Sign In. (This is `400`, not `401`, so a frontend that retries on `401` does not loop.)\n"
+            "- `401`: the `Authorization` header is missing, or the access token is expired or invalid. "
+            "This body uses DRF's standard `detail` shape.\n"
+            "- `403`: the refresh token belongs to a different account than the access token. Nothing "
+            "was blocked."
+        ),
+        request=LogoutSerializer,
+        examples=[
+            OpenApiExample(
+                "Log out",
+                value={"refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...refresh"},
+                request_only=True,
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=MessageResponse,
+                description="Logged out. The refresh token is blacklisted.",
+                examples=[OpenApiExample("Logged out", value={"message": LOGOUT_SUCCESS_MESSAGE})],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Missing field, or the refresh token cannot be used (already logged out, expired, invalid).",
+                examples=[
+                    OpenApiExample("Missing refresh", value={"refresh": ["This field is required."]}),
+                    OpenApiExample("Session already ended", value={"error": LOGOUT_TOKEN_INVALID_MESSAGE}),
+                ],
+            ),
+            401: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="No access token, or the access token is expired or invalid.",
+                examples=[
+                    OpenApiExample(
+                        "No access token",
+                        value={"detail": "Authentication credentials were not provided."},
+                    ),
+                    OpenApiExample(
+                        "Access token expired or invalid",
+                        value={
+                            "detail": "Given token not valid for any token type",
+                            "code": "token_not_valid",
+                            "messages": [
+                                {
+                                    "token_class": "AccessToken",
+                                    "token_type": "access",
+                                    "message": "Token is expired",
+                                }
+                            ],
+                        },
+                    ),
+                ],
+            ),
+            403: OpenApiResponse(
+                response=ErrorResponse,
+                description="The refresh token belongs to a different account. Nothing was blocked.",
+                examples=[OpenApiExample("Wrong account", value={"error": LOGOUT_WRONG_ACCOUNT_MESSAGE})],
+            ),
+        },
+    )
     def logout(self, request):
-        AuthService.logout(request)
-        return Response({"message": "Session closed safely."}, status=status.HTTP_200_OK)
+        serializer = LogoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        AuthService.logout(request.user, serializer.validated_data["refresh"])
+        return Response({"message": LOGOUT_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
