@@ -20,7 +20,7 @@ class User(AbstractUser):
         ("manager", "Customer Success Manager"),
     ]
 
-    role = models.CharField(max_length=50, choices=ROLE_CHOICES)
+    role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["username"]

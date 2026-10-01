@@ -17,10 +17,12 @@ from accounts.services import (
     CODE_EXPIRED_MESSAGE,
     INCORRECT_CODE_MESSAGE,
     NO_ACTIVE_CODE_MESSAGE,
+    SIGNUP_SUCCESS_MESSAGE,
     TOKEN_INVALID_MESSAGE,
     TOO_MANY_ATTEMPTS_MESSAGE,
     CodeDeliveryUnavailable,
     CodeRequestTooSoon,
+    AuthService,
     CodeVerificationFailed,
     OTPService,
     SignupVerificationToken,
@@ -452,3 +454,159 @@ def test_new_code_retires_codes_sent_to_other_letter_cases():
 
     active = OTP.objects.filter(email__iexact="victim@example.com", is_used=False)
     assert list(active.values_list("email", flat=True)) == ["victim@example.com"]
+
+
+@pytest.mark.django_db
+def test_verify_otp_endpoint_rejects_non_ascii_digits(api_client):
+    response = api_client.post(VERIFY_OTP_URL, {"email": NEW_EMAIL, "code": "\u0664\u0668\u0662\u0669\u0661\u0663"}, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"code": ["Enter the 6-digit code."]}
+
+
+SIGNUP_URL = "/api/v1/auth/signup/"
+GOOD_PASSWORD = "Bright-Ledger-2026!"
+
+
+def signup_data(email="Juan.Cruz@Agency.gov", **overrides):
+    data = {
+        "verification_token": SignupVerificationToken.issue(email),
+        "full_name": "Juan dela Cruz",
+        "organization": "Agency Name",
+        "department": "internal_audit",
+        "password": GOOD_PASSWORD,
+        "re_enter_password": GOOD_PASSWORD,
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.mark.django_db
+def test_signup_creates_verified_lowercase_user_without_role():
+    user = AuthService.signup(signup_data())
+
+    assert user.email == "juan.cruz@agency.gov"
+    assert user.is_verified is True
+    assert user.role == ""
+    assert user.department == "internal_audit"
+    assert len(user.username) == 32 and int(user.username, 16) >= 0
+    assert user.check_password(GOOD_PASSWORD)
+    assert mail.outbox == []
+
+
+@pytest.mark.django_db
+def test_signup_allows_emails_sharing_the_part_before_the_at():
+    AuthService.signup(signup_data("john@company-a.com"))
+    AuthService.signup(signup_data("john@company-b.com"))
+
+    assert User.objects.filter(email__startswith="john@").count() == 2
+
+
+@pytest.mark.django_db
+def test_signup_rejects_tampered_or_expired_token():
+    tampered = signup_data()
+    tampered["verification_token"] = tampered["verification_token"].replace("Juan.Cruz", "Evil")
+    with pytest.raises(ValidationError) as excinfo:
+        AuthService.signup(tampered)
+    assert excinfo.value.detail == {"error": TOKEN_INVALID_MESSAGE}
+
+    data = signup_data()
+    with patch("django.core.signing.time.time", return_value=time.time() + 31 * 60):
+        with pytest.raises(ValidationError):
+            AuthService.signup(data)
+
+    assert User.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_signup_rejects_existing_account_and_token_reuse():
+    data = signup_data()
+    AuthService.signup(data)
+
+    with pytest.raises(ValidationError) as excinfo:
+        AuthService.signup(data)
+    assert excinfo.value.detail == {"error": ACCOUNT_EXISTS_MESSAGE}
+
+    create_user("ada@example.com")
+    with pytest.raises(ValidationError):
+        AuthService.signup(signup_data("ADA@example.com"))
+
+
+@pytest.mark.django_db
+def test_signup_rejects_password_similar_to_the_email():
+    data = signup_data("juancruzagency@agency.gov", password="juancruzagency", re_enter_password="juancruzagency")
+
+    with pytest.raises(ValidationError) as excinfo:
+        AuthService.signup(data)
+
+    assert "password" in excinfo.value.detail
+    assert User.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_signup_endpoint_returns_201_with_email(api_client):
+    response = api_client.post(SIGNUP_URL, signup_data(), format="json")
+
+    assert response.status_code == 201
+    assert response.json() == {"message": SIGNUP_SUCCESS_MESSAGE, "email": "juan.cruz@agency.gov"}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "field",
+    ["verification_token", "full_name", "organization", "department", "password", "re_enter_password"],
+)
+def test_signup_endpoint_requires_every_field(api_client, field):
+    data = signup_data()
+    del data[field]
+
+    response = api_client.post(SIGNUP_URL, data, format="json")
+
+    assert response.status_code == 400
+    assert field in response.json()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "overrides, field",
+    [
+        ({"department": "hr"}, "department"),
+        ({"department": ""}, "department"),
+        ({"full_name": "   "}, "full_name"),
+        ({"re_enter_password": "Different-Pass-1"}, "re_enter_password"),
+        ({"password": "Ab1!", "re_enter_password": "Ab1!"}, "password"),
+        ({"verification_token": "not-a-token"}, "error"),
+    ],
+)
+def test_signup_endpoint_rejects_invalid_input(api_client, overrides, field):
+    response = api_client.post(SIGNUP_URL, signup_data(**overrides), format="json")
+
+    assert response.status_code == 400
+    assert field in response.json()
+    assert User.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_signup_endpoint_rejects_existing_account(api_client):
+    create_user("ada@example.com")
+
+    response = api_client.post(SIGNUP_URL, signup_data("ada@example.com"), format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": ACCOUNT_EXISTS_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_full_registration_flow_through_the_api(api_client):
+    api_client.post(SEND_OTP_URL, {"email": NEW_EMAIL}, format="json")
+    code = OTP.objects.get(email=NEW_EMAIL).code
+
+    verified = api_client.post(VERIFY_OTP_URL, {"email": NEW_EMAIL, "code": code}, format="json")
+    token = verified.json()["verification_token"]
+    data = signup_data(verification_token=token)
+    created = api_client.post(SIGNUP_URL, data, format="json")
+
+    assert created.status_code == 201
+    user = User.objects.get(email=NEW_EMAIL)
+    assert user.is_verified is True
+    assert user.role == ""
