@@ -5,6 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from django.contrib.auth import get_user_model, authenticate, login as django_login, logout as django_logout
+from django.core.signing import BadSignature, TimestampSigner
 from kombu.exceptions import OperationalError
 from rest_framework import status
 from rest_framework.exceptions import APIException, ValidationError, AuthenticationFailed
@@ -18,6 +19,30 @@ VERIFICATION_CODE_COOLDOWN_SECONDS = 60
 ACCOUNT_EXISTS_MESSAGE = "An account with this email already exists. Please sign in."
 CODE_TOO_SOON_MESSAGE = "Please wait before requesting a new code."
 DELIVERY_FAILED_MESSAGE = "We could not send the verification code. Please try again shortly."
+
+MAX_CODE_ATTEMPTS = 3
+SIGNUP_TOKEN_MAX_AGE_SECONDS = 30 * 60
+SIGNUP_TOKEN_SALT = "accounts.signup-verification"
+NO_ACTIVE_CODE_MESSAGE = "No active code for this email. Please request a new code."
+CODE_EXPIRED_MESSAGE = "This code has expired. Please request a new code."
+INCORRECT_CODE_MESSAGE = "Incorrect code."
+TOO_MANY_ATTEMPTS_MESSAGE = "Too many incorrect attempts. Please request a new code."
+TOKEN_INVALID_MESSAGE = "Your email verification has expired. Please verify your email again."
+
+
+class SignupVerificationToken:
+    """Signed proof that an email passed code verification; readable for 30 minutes."""
+
+    @staticmethod
+    def issue(email: str) -> str:
+        return TimestampSigner(salt=SIGNUP_TOKEN_SALT).sign(email)
+
+    @staticmethod
+    def read(token: str) -> str:
+        try:
+            return TimestampSigner(salt=SIGNUP_TOKEN_SALT).unsign(token, max_age=SIGNUP_TOKEN_MAX_AGE_SECONDS)
+        except BadSignature:
+            raise ValidationError({"error": TOKEN_INVALID_MESSAGE})
 
 
 class CodeRequestTooSoon(APIException):
@@ -34,6 +59,16 @@ class CodeDeliveryUnavailable(APIException):
     def __init__(self):
         super().__init__()
         self.detail = {"error": DELIVERY_FAILED_MESSAGE}
+
+
+class CodeVerificationFailed(APIException):
+    """400 that keeps numbers (attempts_remaining) as numbers, unlike ValidationError."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+
+    def __init__(self, detail: dict):
+        super().__init__()
+        self.detail = detail
 
 
 class OTPService:
@@ -60,9 +95,44 @@ class OTPService:
             raise CodeDeliveryUnavailable()
 
     @staticmethod
+    def verify_signup_code(email: str, code: str) -> str:
+        """Checks a sign-up code and returns a verification token; wrong guesses are counted."""
+        error = None
+        with transaction.atomic():
+            otp = (
+                OTP.objects.select_for_update()
+                .filter(email__iexact=email, purpose="verification", is_used=False)
+                .order_by("-created_at")
+                .first()
+            )
+            if otp is None:
+                error = {"error": NO_ACTIVE_CODE_MESSAGE}
+            elif otp.is_expired:
+                otp.is_used = True
+                otp.save(update_fields=["is_used"])
+                error = {"error": CODE_EXPIRED_MESSAGE}
+            elif not secrets.compare_digest(otp.code, code):
+                otp.failed_attempts += 1
+                attempts_remaining = MAX_CODE_ATTEMPTS - otp.failed_attempts
+                if attempts_remaining <= 0:
+                    otp.is_used = True
+                    error = {"error": TOO_MANY_ATTEMPTS_MESSAGE}
+                else:
+                    error = {"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": attempts_remaining}
+                otp.save(update_fields=["failed_attempts", "is_used"])
+            else:
+                otp.is_used = True
+                otp.save(update_fields=["is_used"])
+
+        # Raised after the block commits, so counted attempts and cancelled codes stay saved.
+        if error:
+            raise CodeVerificationFailed(error)
+        return SignupVerificationToken.issue(otp.email)
+
+    @staticmethod
     def generate(email: str, purpose="verification"):
         OTP.objects.filter(
-            email=email,
+            email__iexact=email,
             purpose=purpose,
             is_used=False
         ).update(is_used=True)
