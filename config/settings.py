@@ -186,7 +186,11 @@ else:
 # PASSWORD VALIDATION
 # =====================
 AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
+        # full_name is this project's own name field; Django only checks its built-in ones by default.
+        "OPTIONS": {"user_attributes": ("username", "first_name", "last_name", "email", "full_name")},
+    },
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},

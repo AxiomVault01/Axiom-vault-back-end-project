@@ -46,3 +46,6 @@ CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+
+# Fixed, test-only key long enough for JWT signing; never used outside the test suite.
+SECRET_KEY = "test-only-secret-key-for-pytest-0123456789abcdef"

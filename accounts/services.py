@@ -6,12 +6,14 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from datetime import timedelta
-from django.contrib.auth import get_user_model, authenticate, login as django_login, logout as django_logout
+from django.contrib.auth import get_user_model, authenticate, logout as django_logout
+from django.contrib.auth.models import update_last_login
 from django.contrib.auth.password_validation import validate_password
 from django.core.signing import BadSignature, TimestampSigner
 from kombu.exceptions import OperationalError
 from rest_framework import status
-from rest_framework.exceptions import APIException, ValidationError, AuthenticationFailed
+from rest_framework.exceptions import APIException, ValidationError
+from rest_framework_simplejwt.tokens import RefreshToken
 from .models import OTP
 from .tasks import send_otp_email_task
 
@@ -32,6 +34,8 @@ INCORRECT_CODE_MESSAGE = "Incorrect code."
 TOO_MANY_ATTEMPTS_MESSAGE = "Too many incorrect attempts. Please request a new code."
 TOKEN_INVALID_MESSAGE = "Your email verification has expired. Please verify your email again."
 SIGNUP_SUCCESS_MESSAGE = "Account created successfully. You can now sign in."
+INVALID_CREDENTIALS_MESSAGE = "Invalid email or password."
+EMAIL_NOT_VERIFIED_MESSAGE = "Your email is not verified. Please sign up again to verify your email."
 
 
 class SignupVerificationToken:
@@ -75,13 +79,38 @@ class CodeVerificationFailed(APIException):
         self.detail = detail
 
 
+class InvalidCredentials(APIException):
+    status_code = status.HTTP_401_UNAUTHORIZED
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": INVALID_CREDENTIALS_MESSAGE}
+
+
+class EmailNotVerified(APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": EMAIL_NOT_VERIFIED_MESSAGE}
+
+
+def stored_email_for(typed_email: str) -> str:
+    """Returns the email as stored, because authenticate() matches it exactly (case-sensitive)."""
+    if User.objects.filter(email=typed_email).exists():
+        return typed_email
+    matches = list(User.objects.filter(email__iexact=typed_email).values_list("email", flat=True)[:2])
+    # Unknown or ambiguous: keep the typed email so authenticate() still runs its normal password work.
+    return matches[0] if len(matches) == 1 else typed_email
+
+
 class OTPService:
     """Manages generation, expiration, and validation of 6-digit OTP codes."""
 
     @staticmethod
     def send_verification_code(email: str):
-        """Sends a sign-up code to an email that has no account yet, at most once per cooldown."""
-        if User.objects.filter(email__iexact=email).exists():
+        """Sends a sign-up code to an email with no verified account, at most once per cooldown."""
+        if User.objects.filter(email__iexact=email, is_verified=True).exists():
             raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
         latest = OTP.objects.filter(email__iexact=email, purpose="verification").order_by("-created_at").first()
@@ -178,10 +207,13 @@ class AuthService:
 
     @staticmethod
     def signup(validated_data: dict) -> User:
-        """Creates a verified account for the email proven by the verification token."""
+        """Creates a verified account for the email proven by the verification token.
+
+        An unverified account left by the old signup flow is updated in place instead.
+        """
         email = SignupVerificationToken.read(validated_data["verification_token"]).lower()
 
-        if User.objects.filter(email__iexact=email).exists():
+        if User.objects.filter(email__iexact=email, is_verified=True).exists():
             raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
         password = validated_data["password"]
@@ -190,32 +222,58 @@ class AuthService:
         except DjangoValidationError as exc:
             raise ValidationError({"password": list(exc.messages)})
 
+        profile = {
+            "full_name": validated_data["full_name"],
+            "organization": validated_data["organization"],
+            "department": validated_data["department"],
+            "role": "",
+            "is_verified": True,
+        }
         try:
             with transaction.atomic():
+                legacy = list(User.objects.select_for_update().filter(email__iexact=email))
+                if len(legacy) > 1 or any(user.is_verified for user in legacy):
+                    raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
+                if legacy:
+                    user = legacy[0]
+                    user.email = email
+                    for field, value in profile.items():
+                        setattr(user, field, value)
+                    user.set_password(password)
+                    user.save()
+                    return user
                 return User.objects.create_user(
-                    username=uuid.uuid4().hex,
-                    email=email,
-                    password=password,
-                    full_name=validated_data["full_name"],
-                    organization=validated_data["organization"],
-                    department=validated_data["department"],
-                    role="",
-                    is_verified=True,
+                    username=uuid.uuid4().hex, email=email, password=password, **profile
                 )
         except IntegrityError:
             # Two signups for the same email at once: the unique email constraint stops the second.
             raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
     @staticmethod
-    def login(request, email: str, password: str) -> User:
-        """Validates credentials and binds a session to the incoming request."""
-        user = authenticate(request, username=email, password=password)
-        
-        if not user:
-            raise AuthenticationFailed("Invalid authentication credentials.")
-            
-        django_login(request, user)
-        return user
+    def login(request, email: str, password: str) -> dict:
+        """Checks email and password and returns JWT access/refresh tokens with the user's profile."""
+        stored_email = stored_email_for(email)
+        user = authenticate(request, username=stored_email, password=password)
+        if user is None:
+            raise InvalidCredentials()
+        # Checked only after the password is correct, so a guesser learns nothing.
+        if not user.is_verified:
+            raise EmailNotVerified()
+
+        refresh = RefreshToken.for_user(user)
+        update_last_login(None, user)
+        return {
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "organization": user.organization,
+                "department": user.department,
+                "role": user.role,
+            },
+        }
 
     @staticmethod
     def forgot_password(email: str) -> bool:

@@ -7,6 +7,8 @@ from .services import (
     ACCOUNT_EXISTS_MESSAGE,
     CODE_EXPIRED_MESSAGE,
     CODE_TOO_SOON_MESSAGE,
+    EMAIL_NOT_VERIFIED_MESSAGE,
+    INVALID_CREDENTIALS_MESSAGE,
     DELIVERY_FAILED_MESSAGE,
     INCORRECT_CODE_MESSAGE,
     MAX_CODE_ATTEMPTS,
@@ -37,6 +39,37 @@ ErrorResponse = inline_serializer("ErrorResponse", {"error": serializers.CharFie
 RetryErrorResponse = inline_serializer(
     "RetryErrorResponse",
     {"error": serializers.CharField(), "retry_after": serializers.IntegerField()},
+)
+LoginUserSchema = inline_serializer(
+    "LoginUser",
+    {
+        "id": serializers.UUIDField(help_text="The user's permanent ID."),
+        "email": serializers.EmailField(help_text="Login email, stored in lowercase for new accounts."),
+        "full_name": serializers.CharField(help_text="Name shown in the app."),
+        "organization": serializers.CharField(help_text="Organization entered at registration."),
+        "department": serializers.CharField(
+            help_text="Department value, e.g. `internal_audit`, `finance`, `compliance`, "
+            "`risk_management`, `human_resources`, `others`."
+        ),
+        "role": serializers.CharField(
+            help_text="`fraud_analyst`, `compliance_officer`, `auditor`, `manager`, or an empty "
+            "string when an admin has not assigned a role yet."
+        ),
+    },
+)
+LoginResponse = inline_serializer(
+    "LoginResponse",
+    {
+        "access": serializers.CharField(
+            help_text="JWT access token, valid for 30 minutes. Send it on every protected request "
+            "as `Authorization: Bearer <access>`."
+        ),
+        "refresh": serializers.CharField(
+            help_text="JWT refresh token, valid for 1 day. Keep it safe; it is used to get a new "
+            "access token and to log out."
+        ),
+        "user": LoginUserSchema,
+    },
 )
 SignupResponse = inline_serializer(
     "SignupResponse", {"message": serializers.CharField(), "email": serializers.EmailField()}
@@ -81,19 +114,49 @@ def code_request_responses(success_message, success_description):
 
 
 class AuthViewSet(viewsets.ViewSet):
+    """Account endpoints. Only logout needs a logged-in user; the rest are public."""
 
     serializer_class = SendOTPSerializer
-    """Unified ViewSet routing requests straight to dedicated service engines."""
+    AUTHENTICATED_ACTIONS = {"logout"}
+
+    def initialize_request(self, request, *args, **kwargs):
+        # DRF picks authenticators before it sets self.action, so work out the action first.
+        self.action = self.action_map.get(request.method.lower())
+        return super().initialize_request(request, *args, **kwargs)
+
+    def get_authenticators(self):
+        # Public endpoints ignore any Authorization header, so a stale token kept by the
+        # frontend cannot turn login or signup into a 401.
+        if getattr(self, "action", None) in self.AUTHENTICATED_ACTIONS:
+            return super().get_authenticators()
+        return []
 
     @extend_schema(
         tags=["Auth"],
         summary="Send a sign-up verification code",
         description=(
-            "Step 1 of email-first registration (the 'Get Started' screen). Emails a "
-            "6-digit code, valid for 2 minutes, to an email address that has no account "
-            f"yet. A new code for the same email can be requested every "
-            f"{VERIFICATION_CODE_COOLDOWN_SECONDS} seconds; a newer code replaces older ones. "
-            "No authentication required."
+            "**Step 1 of email-first registration** (Figma screen *Get Started*, button "
+            "*Send Verification Code*).\n\n"
+            "Emails a 6-digit verification code to the work email address. The code is valid for "
+            "**2 minutes**. The next screen (*Verify Code*) sends it to `verify-otp`.\n\n"
+            "**Request field**\n"
+            "- `email` (required): any valid email address. Letter case does not matter.\n\n"
+            "**Rules**\n"
+            "- An email that already belongs to a **verified** account is refused (400 *Account "
+            "exists*); show the *Sign In* link. An account left **unverified** by the old signup "
+            "flow does not count: that person can register again and their old account is "
+            "replaced at the end of registration.\n"
+            f"- One code per email every **{VERIFICATION_CODE_COOLDOWN_SECONDS} seconds** (letter "
+            "case ignored). A request inside that window gets 429 with `retry_after` = seconds to "
+            "wait; use it for the *Resend in N seconds* countdown.\n"
+            "- A new code cancels any older unused code for the same email.\n\n"
+            "**Responses**\n"
+            "- `200`: the code was saved and the email was queued. Move to *Verify Code*.\n"
+            "- `400`: invalid email field, or a verified account already uses the email.\n"
+            "- `429`: too soon; wait `retry_after` seconds.\n"
+            "- `503`: the email could not be queued (mail queue unavailable). No code was created; "
+            "ask the user to try again shortly.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
         ),
         request=SendOTPSerializer,
         examples=[
@@ -175,9 +238,17 @@ class AuthViewSet(viewsets.ViewSet):
         tags=["Auth"],
         summary="Resend a sign-up verification code",
         description=(
-            "Sends a new 6-digit code (the 'Resend' link on the Verify Code screen). Same rules as "
-            f"send-otp: no account may use the email, and one code per {VERIFICATION_CODE_COOLDOWN_SECONDS} "
-            "seconds. The new code replaces older ones. No authentication required."
+            "**Resend link on the *Verify Code* screen**, shown when the *Resend in N seconds* "
+            "countdown reaches zero.\n\n"
+            "Sends a fresh 6-digit code (valid for 2 minutes) and cancels the previous one, so only "
+            "the newest code works. It follows exactly the same rules and responses as `send-otp`:\n"
+            "- the email must not belong to a **verified** account (400 *Account exists*);\n"
+            f"- one code per email every **{VERIFICATION_CODE_COOLDOWN_SECONDS} seconds** "
+            "(429 with `retry_after`);\n"
+            "- 503 if the email could not be queued (no code is created).\n\n"
+            "**Request field**\n"
+            "- `email` (required): the same address used on the *Get Started* screen.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
         ),
         request=ResendOTPSerializer,
         examples=[
@@ -196,13 +267,32 @@ class AuthViewSet(viewsets.ViewSet):
         tags=["Auth"],
         summary="Create an account (complete registration)",
         description=(
-            "Step 3 of email-first registration (the 'Create Your Account' form). Send the "
-            "`verification_token` from verify-otp with the form fields; the account's email is "
-            "taken from the token and stored in lowercase. The token is valid for "
-            f"{SIGNUP_TOKEN_MAX_AGE_SECONDS // 60} minutes after verification. New accounts are "
-            "verified and have no role until an admin assigns one. Passwords need at least 8 "
-            "characters, must not be too common, all numbers, or too similar to the name or "
-            "email. No authentication required."
+            "**Step 3 of email-first registration** (Figma screen *Create Your Account*, button "
+            "*Create Account*).\n\n"
+            "Creates the account for the email that was verified with `verify-otp`. The email is "
+            "**not** sent in this form: it is read from `verification_token`, so nobody can verify "
+            "one address and register another. It is stored in lowercase.\n\n"
+            "**Request fields**\n"
+            f"- `verification_token` (required): from the `verify-otp` response; valid for "
+            f"{SIGNUP_TOKEN_MAX_AGE_SECONDS // 60} minutes after verification.\n"
+            "- `full_name` (required, max 255 characters).\n"
+            "- `organization` (required, max 255 characters).\n"
+            "- `department` (required): one of `internal_audit`, `finance`, `compliance`, "
+            "`risk_management`, `human_resources`, `others` (the dropdown values).\n"
+            "- `password` (required): at least 8 characters, not a common password, not only "
+            "numbers, and not too similar to the full name or email.\n"
+            "- `re_enter_password` (required): must equal `password`.\n\n"
+            "The *Terms of Service* checkbox is enforced by the frontend only and is not sent.\n\n"
+            "**What gets created**\n"
+            "- A verified account with **no role**; an admin assigns the role later in `/admin/`.\n"
+            "- If the email belongs to an account left **unverified** by the old signup flow, that "
+            "account is updated in place instead (new details and password, verified, role "
+            "cleared).\n\n"
+            "**Responses**\n"
+            "- `201`: account created; send the user to *Sign In*.\n"
+            "- `400`: a field error, passwords that differ, a weak password, an invalid or expired "
+            "token (verify the email again), or a verified account already uses the email.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
         ),
         request=SignupSerializer,
         examples=[
@@ -257,17 +347,99 @@ class AuthViewSet(viewsets.ViewSet):
             status=status.HTTP_201_CREATED,
         )
 
-    @extend_schema(request=LoginSerializer, tags=["Auth"])
+    @extend_schema(
+        tags=["Auth"],
+        summary="Log in and get JWT tokens",
+        description=(
+            "**Sign In screen.** Checks the email and password and returns two JWT tokens plus "
+            "the user's profile.\n\n"
+            "**Request fields**\n"
+            "- `email` (required): the account's email. Letter case does not matter.\n"
+            "- `password` (required).\n\n"
+            "**Using the tokens**\n"
+            "- `access` is valid for **30 minutes**. Send it on every protected request in the "
+            "header `Authorization: Bearer <access>`.\n"
+            "- `refresh` is valid for **1 day**. Use it to get a new access token when the access "
+            "token expires, and send it when logging out. Store both securely; never put them in "
+            "URLs or logs.\n\n"
+            "**The `user` object**\n"
+            "- Use `full_name` for display. `role` is an empty string until an admin assigns one; "
+            "the frontend can show a *waiting for access* message in that case.\n\n"
+            "**Responses**\n"
+            "- `200`: logged in; store the tokens and continue into the app.\n"
+            "- `400`: a field is missing or the email is not a valid address.\n"
+            "- `401`: wrong email or password, or the account is deactivated. The message is the "
+            "same in every case on purpose, so the API never reveals which emails have accounts.\n"
+            "- `403`: the password was correct but the email was never verified (an account from "
+            "the old signup flow). Send the user to *Get Started* to register again; their old "
+            "account is replaced.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
+        ),
+        request=LoginSerializer,
+        examples=[
+            OpenApiExample(
+                "Sign in",
+                value={"email": "juan@agency.gov", "password": "Bright-Ledger-2026!"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                "Email in any letter case",
+                value={"email": "Juan@Agency.GOV", "password": "Bright-Ledger-2026!"},
+                request_only=True,
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=LoginResponse,
+                description="Logged in. Store both tokens.",
+                examples=[
+                    OpenApiExample(
+                        "Logged in",
+                        value={
+                            "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...access",
+                            "refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...refresh",
+                            "user": {
+                                "id": "3f2a7c9e-1b4d-4e8a-9c2f-6d5e4b3a2c1d",
+                                "email": "juan@agency.gov",
+                                "full_name": "Juan dela Cruz",
+                                "organization": "Agency Name",
+                                "department": "internal_audit",
+                                "role": "",
+                            },
+                        },
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="A field is missing or invalid.",
+                examples=[
+                    OpenApiExample("Missing password", value={"password": ["This field is required."]}),
+                    OpenApiExample("Invalid email", value={"email": ["Enter a valid email address."]}),
+                ],
+            ),
+            401: OpenApiResponse(
+                response=ErrorResponse,
+                description="Wrong email or password, or a deactivated account.",
+                examples=[OpenApiExample("Invalid credentials", value={"error": INVALID_CREDENTIALS_MESSAGE})],
+            ),
+            403: OpenApiResponse(
+                response=ErrorResponse,
+                description="Correct password, but the email was never verified. Register again.",
+                examples=[OpenApiExample("Email not verified", value={"error": EMAIL_NOT_VERIFIED_MESSAGE})],
+            ),
+        },
+    )
     def login(self, request):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        AuthService.login(
-            request, 
-            email=serializer.validated_data["email"], 
-            password=serializer.validated_data["password"]
+        result = AuthService.login(
+            request,
+            email=serializer.validated_data["email"],
+            password=serializer.validated_data["password"],
         )
-        return Response({"message": "Authentication successful."}, status=status.HTTP_200_OK)
+        return Response(result, status=status.HTTP_200_OK)
 
     @extend_schema(request=SendOTPSerializer, tags=["Auth"])
     def forgot_password(self, request):
