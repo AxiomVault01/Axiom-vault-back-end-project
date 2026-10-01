@@ -1,31 +1,73 @@
-import random
+import math
+import secrets
 import string
+from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from django.contrib.auth import get_user_model, authenticate, login as django_login, logout as django_logout
-from rest_framework.exceptions import ValidationError, AuthenticationFailed
+from kombu.exceptions import OperationalError
+from rest_framework import status
+from rest_framework.exceptions import APIException, ValidationError, AuthenticationFailed
 from .models import OTP
 from .tasks import send_otp_email_task
 
 
 User = get_user_model()
 
+VERIFICATION_CODE_COOLDOWN_SECONDS = 60
+ACCOUNT_EXISTS_MESSAGE = "An account with this email already exists. Please sign in."
+CODE_TOO_SOON_MESSAGE = "Please wait before requesting a new code."
+DELIVERY_FAILED_MESSAGE = "We could not send the verification code. Please try again shortly."
+
+
+class CodeRequestTooSoon(APIException):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+
+    def __init__(self, retry_after: int):
+        super().__init__()
+        self.detail = {"error": CODE_TOO_SOON_MESSAGE, "retry_after": retry_after}
+
+
+class CodeDeliveryUnavailable(APIException):
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": DELIVERY_FAILED_MESSAGE}
+
+
 class OTPService:
     """Manages generation, expiration, and validation of 6-digit OTP codes."""
-    
+
+    @staticmethod
+    def send_verification_code(email: str):
+        """Sends a sign-up code to an email that has no account yet, at most once per cooldown."""
+        if User.objects.filter(email__iexact=email).exists():
+            raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
+
+        latest = OTP.objects.filter(email=email, purpose="verification").order_by("-created_at").first()
+        if latest:
+            elapsed = (timezone.now() - latest.created_at).total_seconds()
+            if elapsed < VERIFICATION_CODE_COOLDOWN_SECONDS:
+                raise CodeRequestTooSoon(retry_after=math.ceil(VERIFICATION_CODE_COOLDOWN_SECONDS - elapsed))
+
+        try:
+            # Queueing the email inside the transaction means a broker failure also
+            # undoes the new code and the invalidation of older ones.
+            with transaction.atomic():
+                OTPService.generate(email, purpose="verification")
+        except OperationalError:
+            raise CodeDeliveryUnavailable()
 
     @staticmethod
     def generate(email: str, purpose="verification"):
-
-        print(f"GENERATING OTP FOR -> {email}")
-
         OTP.objects.filter(
             email=email,
             purpose=purpose,
             is_used=False
         ).update(is_used=True)
 
-        code = "".join(random.choices(string.digits, k=6))
+        code = "".join(secrets.choice(string.digits) for _ in range(6))
 
         OTP.objects.create(
             email=email,
