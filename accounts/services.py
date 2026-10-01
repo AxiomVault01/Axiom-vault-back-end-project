@@ -45,7 +45,7 @@ class OTPService:
         if User.objects.filter(email__iexact=email).exists():
             raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
-        latest = OTP.objects.filter(email=email, purpose="verification").order_by("-created_at").first()
+        latest = OTP.objects.filter(email__iexact=email, purpose="verification").order_by("-created_at").first()
         if latest:
             elapsed = (timezone.now() - latest.created_at).total_seconds()
             if elapsed < VERIFICATION_CODE_COOLDOWN_SECONDS:

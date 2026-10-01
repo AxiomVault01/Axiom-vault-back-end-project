@@ -1,4 +1,5 @@
 from datetime import timedelta
+from smtplib import SMTPRecipientsRefused
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +17,7 @@ from accounts.services import (
     CodeRequestTooSoon,
     OTPService,
 )
+from accounts.tasks import OTPEmailDeliveryError, send_otp_email_task
 
 User = get_user_model()
 
@@ -178,3 +180,30 @@ def test_send_otp_endpoint_returns_503_when_email_cannot_be_queued(api_client):
     assert response.status_code == 503
     assert response.json() == {"error": "We could not send the verification code. Please try again shortly."}
     assert OTP.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_cooldown_applies_to_letter_case_variants_of_the_same_email():
+    OTPService.send_verification_code("victim@example.com")
+
+    with pytest.raises(CodeRequestTooSoon):
+        OTPService.send_verification_code("VICTIM@Example.com")
+
+    assert OTP.objects.count() == 1
+    assert len(mail.outbox) == 1
+
+
+def test_failed_otp_email_never_exposes_the_recipient_address(caplog):
+    address = "victim@example.com"
+    refused = SMTPRecipientsRefused({address: (550, b"5.1.1 victim@example.com does not exist")})
+
+    with patch("accounts.tasks.send_mail", side_effect=refused):
+        with pytest.raises(OTPEmailDeliveryError) as excinfo:
+            send_otp_email_task.run(address, "123456")
+
+    assert address not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+    assert "SMTPRecipientsRefused" in caplog.text
+    assert address not in caplog.text
+    assert "123456" not in caplog.text
