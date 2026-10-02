@@ -36,8 +36,9 @@ services:
       # Brevo SMTP (or any SMTP provider).
       - key: EMAIL_HOST
         value: smtp-relay.brevo.com
+      # 2525, not 587: Render's free plan blocks outbound 25, 465, and 587.
       - key: EMAIL_PORT
-        value: "587"
+        value: "2525"
       - key: EMAIL_USE_SSL
         value: "False"
       - key: EMAIL_USE_TLS
