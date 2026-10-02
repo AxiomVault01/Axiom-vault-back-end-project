@@ -74,6 +74,8 @@ class OTP(models.Model):
 
     is_used = models.BooleanField(default=False)
 
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+
     expires_at = models.DateTimeField()
 
     created_at = models.DateTimeField(

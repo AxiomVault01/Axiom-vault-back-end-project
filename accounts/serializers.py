@@ -1,3 +1,4 @@
+from django.core.validators import RegexValidator
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -9,7 +10,10 @@ class SendOTPSerializer(serializers.Serializer):
 
 class VerifyOTPSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
-    code = serializers.CharField(max_length=6, required=True)
+    code = serializers.CharField(
+        required=True,
+        validators=[RegexValidator(r"^\d{6}$", message="Enter the 6-digit code.")],
+    )
 
 class ResendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)

@@ -1,3 +1,4 @@
+import time
 from datetime import timedelta
 from smtplib import SMTPRecipientsRefused
 from unittest.mock import patch
@@ -13,9 +14,16 @@ from rest_framework.test import APIClient
 from accounts.models import OTP
 from accounts.services import (
     ACCOUNT_EXISTS_MESSAGE,
+    CODE_EXPIRED_MESSAGE,
+    INCORRECT_CODE_MESSAGE,
+    NO_ACTIVE_CODE_MESSAGE,
+    TOKEN_INVALID_MESSAGE,
+    TOO_MANY_ATTEMPTS_MESSAGE,
     CodeDeliveryUnavailable,
     CodeRequestTooSoon,
+    CodeVerificationFailed,
     OTPService,
+    SignupVerificationToken,
 )
 from accounts.tasks import OTPEmailDeliveryError, send_otp_email_task
 
@@ -207,3 +215,240 @@ def test_failed_otp_email_never_exposes_the_recipient_address(caplog):
     assert "SMTPRecipientsRefused" in caplog.text
     assert address not in caplog.text
     assert "123456" not in caplog.text
+
+
+def send_code(email=NEW_EMAIL):
+    OTPService.send_verification_code(email)
+    return OTP.objects.filter(email=email).latest("created_at")
+
+
+def wrong_code(otp):
+    return "000000" if otp.code != "000000" else "111111"
+
+
+@pytest.mark.django_db
+def test_correct_code_returns_token_for_the_email_and_uses_the_code():
+    otp = send_code()
+
+    token = OTPService.verify_signup_code(NEW_EMAIL, otp.code)
+
+    assert SignupVerificationToken.read(token) == NEW_EMAIL
+    otp.refresh_from_db()
+    assert otp.is_used is True
+
+
+@pytest.mark.django_db
+def test_code_verifies_with_email_in_different_letter_case():
+    otp = send_code()
+
+    token = OTPService.verify_signup_code(NEW_EMAIL.upper(), otp.code)
+
+    assert SignupVerificationToken.read(token) == NEW_EMAIL
+
+
+@pytest.mark.django_db
+def test_wrong_codes_count_down_then_cancel_the_code():
+    otp = send_code()
+    bad = wrong_code(otp)
+
+    for remaining in (2, 1):
+        with pytest.raises(CodeVerificationFailed) as excinfo:
+            OTPService.verify_signup_code(NEW_EMAIL, bad)
+        assert excinfo.value.detail == {"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": remaining}
+
+    with pytest.raises(CodeVerificationFailed) as excinfo:
+        OTPService.verify_signup_code(NEW_EMAIL, bad)
+    assert excinfo.value.detail == {"error": TOO_MANY_ATTEMPTS_MESSAGE}
+
+    otp.refresh_from_db()
+    assert otp.failed_attempts == 3
+    assert otp.is_used is True
+    with pytest.raises(CodeVerificationFailed) as excinfo:
+        OTPService.verify_signup_code(NEW_EMAIL, otp.code)
+    assert excinfo.value.detail == {"error": NO_ACTIVE_CODE_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_expired_code_is_refused_and_cancelled():
+    otp = send_code()
+    OTP.objects.filter(pk=otp.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+
+    with pytest.raises(CodeVerificationFailed) as excinfo:
+        OTPService.verify_signup_code(NEW_EMAIL, otp.code)
+
+    assert excinfo.value.detail == {"error": CODE_EXPIRED_MESSAGE}
+    otp.refresh_from_db()
+    assert otp.is_used is True
+
+
+@pytest.mark.django_db
+def test_verify_without_any_code_sent_is_refused():
+    with pytest.raises(CodeVerificationFailed) as excinfo:
+        OTPService.verify_signup_code(NEW_EMAIL, "123456")
+
+    assert excinfo.value.detail == {"error": NO_ACTIVE_CODE_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_used_code_cannot_be_reused():
+    otp = send_code()
+    OTPService.verify_signup_code(NEW_EMAIL, otp.code)
+
+    with pytest.raises(CodeVerificationFailed) as excinfo:
+        OTPService.verify_signup_code(NEW_EMAIL, otp.code)
+
+    assert excinfo.value.detail == {"error": NO_ACTIVE_CODE_MESSAGE}
+
+
+def test_tampered_token_is_rejected():
+    token = SignupVerificationToken.issue(NEW_EMAIL)
+    tampered = token.replace(NEW_EMAIL, "attacker@evil.test")
+
+    with pytest.raises(ValidationError) as excinfo:
+        SignupVerificationToken.read(tampered)
+
+    assert excinfo.value.detail == {"error": TOKEN_INVALID_MESSAGE}
+
+
+def test_token_expires_after_30_minutes():
+    token = SignupVerificationToken.issue(NEW_EMAIL)
+    now = time.time()
+
+    with patch("django.core.signing.time.time", return_value=now + 29 * 60):
+        assert SignupVerificationToken.read(token) == NEW_EMAIL
+    with patch("django.core.signing.time.time", return_value=now + 31 * 60):
+        with pytest.raises(ValidationError) as excinfo:
+            SignupVerificationToken.read(token)
+
+    assert excinfo.value.detail == {"error": TOKEN_INVALID_MESSAGE}
+
+
+VERIFY_OTP_URL = "/api/v1/auth/verify-otp/"
+RESEND_OTP_URL = "/api/v1/auth/resend-otp/"
+
+
+@pytest.mark.django_db
+def test_verify_otp_endpoint_returns_token(api_client):
+    otp = send_code()
+
+    response = api_client.post(VERIFY_OTP_URL, {"email": NEW_EMAIL, "code": otp.code}, format="json")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["message"] == "OTP validation verified successfully."
+    assert body["expires_in"] == 1800
+    assert SignupVerificationToken.read(body["verification_token"]) == NEW_EMAIL
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "body, field",
+    [
+        ({}, "email"),
+        ({"email": NEW_EMAIL}, "code"),
+        ({"email": NEW_EMAIL, "code": "12345"}, "code"),
+        ({"email": NEW_EMAIL, "code": "12a456"}, "code"),
+        ({"email": "not-an-email", "code": "123456"}, "email"),
+    ],
+)
+def test_verify_otp_endpoint_rejects_bad_input(api_client, body, field):
+    response = api_client.post(VERIFY_OTP_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert field in response.json()
+
+
+@pytest.mark.django_db
+def test_verify_otp_endpoint_code_format_message(api_client):
+    response = api_client.post(VERIFY_OTP_URL, {"email": NEW_EMAIL, "code": "12345"}, format="json")
+
+    assert response.json() == {"code": ["Enter the 6-digit code."]}
+
+
+@pytest.mark.django_db
+def test_verify_otp_endpoint_counts_wrong_codes_as_numbers(api_client):
+    otp = send_code()
+    body = {"email": NEW_EMAIL, "code": wrong_code(otp)}
+
+    first = api_client.post(VERIFY_OTP_URL, body, format="json")
+    second = api_client.post(VERIFY_OTP_URL, body, format="json")
+    third = api_client.post(VERIFY_OTP_URL, body, format="json")
+
+    assert first.status_code == 400
+    assert first.json() == {"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": 2}
+    assert second.json() == {"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": 1}
+    assert third.status_code == 400
+    assert third.json() == {"error": TOO_MANY_ATTEMPTS_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_verify_otp_endpoint_rejects_expired_code(api_client):
+    otp = send_code()
+    OTP.objects.filter(pk=otp.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+
+    response = api_client.post(VERIFY_OTP_URL, {"email": NEW_EMAIL, "code": otp.code}, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": CODE_EXPIRED_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_verify_otp_endpoint_without_code_sent(api_client):
+    response = api_client.post(VERIFY_OTP_URL, {"email": NEW_EMAIL, "code": "123456"}, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": NO_ACTIVE_CODE_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_resend_otp_endpoint_sends_new_code_after_cooldown(api_client):
+    first = send_code()
+    age_codes(NEW_EMAIL, 61)
+
+    response = api_client.post(RESEND_OTP_URL, {"email": NEW_EMAIL}, format="json")
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "A fresh OTP code has been issued."}
+    first.refresh_from_db()
+    assert first.is_used is True
+    assert OTP.objects.filter(email=NEW_EMAIL, is_used=False).count() == 1
+
+
+@pytest.mark.django_db
+def test_resend_otp_endpoint_rejects_existing_account(api_client):
+    create_user("ada@example.com")
+
+    response = api_client.post(RESEND_OTP_URL, {"email": "ada@example.com"}, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": ACCOUNT_EXISTS_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_resend_otp_endpoint_within_cooldown_returns_429(api_client):
+    send_code()
+
+    response = api_client.post(RESEND_OTP_URL, {"email": NEW_EMAIL}, format="json")
+
+    assert response.status_code == 429
+    assert 1 <= response.json()["retry_after"] <= 60
+
+
+@pytest.mark.django_db
+def test_resend_otp_endpoint_returns_503_when_email_cannot_be_queued(api_client):
+    with patch("accounts.services.send_otp_email_task.delay", side_effect=OperationalError("broker down")):
+        response = api_client.post(RESEND_OTP_URL, {"email": NEW_EMAIL}, format="json")
+
+    assert response.status_code == 503
+    assert OTP.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_new_code_retires_codes_sent_to_other_letter_cases():
+    OTPService.send_verification_code("Victim@Example.com")
+    age_codes("Victim@Example.com", 61)
+
+    OTPService.send_verification_code("victim@example.com")
+
+    active = OTP.objects.filter(email__iexact="victim@example.com", is_used=False)
+    assert list(active.values_list("email", flat=True)) == ["victim@example.com"]
