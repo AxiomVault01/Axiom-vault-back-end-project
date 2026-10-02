@@ -17,8 +17,13 @@ from accounts.models import OTP
 from accounts.services import (
     ACCOUNT_EXISTS_MESSAGE,
     CODE_EXPIRED_MESSAGE,
+    DELIVERY_FAILED_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
+    FORGOT_PASSWORD_MESSAGE,
     INVALID_CREDENTIALS_MESSAGE,
+    PASSWORD_RESET_SUCCESS_MESSAGE,
+    RESET_CODE_VERIFIED_MESSAGE,
+    RESET_TOKEN_INVALID_MESSAGE,
     INCORRECT_CODE_MESSAGE,
     LOGOUT_SUCCESS_MESSAGE,
     LOGOUT_TOKEN_INVALID_MESSAGE,
@@ -36,9 +41,10 @@ from accounts.services import (
     LogoutTokenInvalid,
     LogoutWrongAccount,
     OTPService,
+    PasswordResetToken,
     SignupVerificationToken,
 )
-from accounts.tasks import OTPEmailDeliveryError, send_otp_email_task
+from accounts.tasks import PASSWORD_RESET_EMAIL_SUBJECT, OTPEmailDeliveryError, send_otp_email_task
 
 User = get_user_model()
 
@@ -1051,3 +1057,350 @@ def test_logout_endpoint_refuses_another_accounts_refresh_token(api_client):
     assert response.status_code == 403
     assert response.json() == {"error": LOGOUT_WRONG_ACCOUNT_MESSAGE}
     assert not BlacklistedToken.objects.exists()
+
+
+# --- 4: forgot and reset password ---
+
+FORGOT_URL = "/api/v1/auth/forgot-password/"
+VERIFY_RESET_URL = "/api/v1/auth/verify-reset-code/"
+RESET_URL = "/api/v1/auth/reset-password/"
+NEW_PASSWORD = "Quiet-Harbor-2026!"
+
+
+def reset_codes(email="ada@example.com"):
+    return OTP.objects.filter(email__iexact=email, purpose="password_reset")
+
+
+def reset_code_for(email="ada@example.com"):
+    AuthService.forgot_password(email)
+    return reset_codes(email).latest("created_at")
+
+
+def reset_token_for(user):
+    otp = reset_code_for(user.email)
+    return OTPService.verify_reset_code(user.email, otp.code)
+
+
+def test_reset_email_has_its_own_subject_and_lifetime():
+    send_otp_email_task.run("ada@example.com", "123456", "password_reset")
+    send_otp_email_task.run("ada@example.com", "654321")
+
+    reset, signup = mail.outbox
+    assert reset.subject == PASSWORD_RESET_EMAIL_SUBJECT
+    assert "123456" in reset.body and "10 minutes" in reset.body
+    assert signup.subject == "Your AxiomVault Verification Code"
+    assert signup.body == "Your OTP is 654321"
+
+
+@pytest.mark.django_db
+def test_forgot_password_emails_a_10_minute_code_to_the_stored_email():
+    create_user("ada@example.com")
+
+    AuthService.forgot_password("ADA@Example.com")
+
+    otp = reset_codes().get()
+    assert otp.email == "ada@example.com"
+    assert otp.is_used is False
+    lifetime = (otp.expires_at - otp.created_at).total_seconds()
+    assert 9 * 60 < lifetime <= 10 * 60
+    assert len(mail.outbox) == 1
+    assert mail.outbox[0].to == ["ada@example.com"]
+    assert mail.outbox[0].subject == PASSWORD_RESET_EMAIL_SUBJECT
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("setup", [
+    lambda: None,
+    lambda: create_user("ada@example.com", is_verified=False),
+    lambda: create_user("ada@example.com", is_active=False),
+], ids=["unknown", "unverified", "deactivated"])
+def test_forgot_password_sends_nothing_to_ineligible_accounts(setup):
+    setup()
+
+    AuthService.forgot_password("ada@example.com")
+
+    assert not reset_codes().exists()
+    assert mail.outbox == []
+
+
+@pytest.mark.django_db
+def test_forgot_password_cooldown_is_silent_and_keeps_the_first_code():
+    create_user("ada@example.com")
+    first = reset_code_for()
+
+    AuthService.forgot_password("ada@example.com")
+
+    assert reset_codes().count() == 1
+    first.refresh_from_db()
+    assert first.is_used is False
+    assert len(mail.outbox) == 1
+
+
+@pytest.mark.django_db
+def test_forgot_password_after_cooldown_cancels_the_old_code_but_not_signup_codes():
+    create_user("ada@example.com")
+    signup = OTP.objects.create(
+        email="ada@example.com", code="111111", purpose="verification",
+        expires_at=timezone.now() + timedelta(minutes=2),
+    )
+    first = reset_code_for()
+    reset_codes().update(created_at=timezone.now() - timedelta(seconds=61))
+
+    AuthService.forgot_password("ada@example.com")
+
+    first.refresh_from_db()
+    signup.refresh_from_db()
+    assert first.is_used is True
+    assert reset_codes().filter(is_used=False).count() == 1
+    assert signup.is_used is False
+
+
+@pytest.mark.django_db
+def test_forgot_password_broker_failure_leaves_no_new_code():
+    create_user("ada@example.com")
+
+    with patch("accounts.services.send_otp_email_task.delay", side_effect=OperationalError("broker down")):
+        with pytest.raises(CodeDeliveryUnavailable):
+            AuthService.forgot_password("ada@example.com")
+
+    assert not reset_codes().exists()
+
+
+@pytest.mark.django_db
+def test_forgot_password_endpoint_gives_the_same_answer_for_every_email(api_client):
+    create_user("ada@example.com")
+    api_client.credentials(HTTP_AUTHORIZATION="Bearer expired-or-garbage")
+
+    known = api_client.post(FORGOT_URL, {"email": "ada@example.com"}, format="json")
+    unknown = api_client.post(FORGOT_URL, {"email": "nobody@example.com"}, format="json")
+
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json() == {"message": FORGOT_PASSWORD_MESSAGE}
+    assert reset_codes().count() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("body", [{}, {"email": "not-an-email"}])
+def test_forgot_password_endpoint_rejects_bad_email(api_client, body):
+    response = api_client.post(FORGOT_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert "email" in response.json()
+
+
+@pytest.mark.django_db
+def test_forgot_password_endpoint_returns_503_when_email_cannot_be_queued(api_client):
+    create_user("ada@example.com")
+
+    with patch("accounts.services.send_otp_email_task.delay", side_effect=OperationalError("broker down")):
+        response = api_client.post(FORGOT_URL, {"email": "ada@example.com"}, format="json")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": DELIVERY_FAILED_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_correct_reset_code_returns_a_token_for_the_user_and_uses_the_code():
+    user = create_user("ada@example.com")
+    otp = reset_code_for()
+
+    token = OTPService.verify_reset_code("ADA@example.com", otp.code)
+
+    assert PasswordResetToken.read(token) == user
+    otp.refresh_from_db()
+    assert otp.is_used is True
+
+
+@pytest.mark.django_db
+def test_wrong_reset_codes_count_down_then_cancel_the_code():
+    create_user("ada@example.com")
+    otp = reset_code_for()
+
+    for remaining in (2, 1):
+        with pytest.raises(CodeVerificationFailed) as error:
+            OTPService.verify_reset_code("ada@example.com", wrong_code(otp))
+        assert error.value.detail == {"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": remaining}
+    with pytest.raises(CodeVerificationFailed) as error:
+        OTPService.verify_reset_code("ada@example.com", wrong_code(otp))
+
+    assert error.value.detail == {"error": TOO_MANY_ATTEMPTS_MESSAGE}
+    with pytest.raises(CodeVerificationFailed) as error:
+        OTPService.verify_reset_code("ada@example.com", otp.code)
+    assert error.value.detail == {"error": NO_ACTIVE_CODE_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_expired_reset_code_is_refused():
+    create_user("ada@example.com")
+    otp = reset_code_for()
+    reset_codes().update(expires_at=timezone.now() - timedelta(seconds=1))
+
+    with pytest.raises(CodeVerificationFailed) as error:
+        OTPService.verify_reset_code("ada@example.com", otp.code)
+
+    assert error.value.detail == {"error": CODE_EXPIRED_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_signup_and_reset_codes_cannot_be_swapped():
+    create_user("ada@example.com")
+    reset_otp = reset_code_for()
+    signup_otp = OTP.objects.create(
+        email="ada@example.com", code=wrong_code(reset_otp), purpose="verification",
+        expires_at=timezone.now() + timedelta(minutes=2),
+    )
+
+    with pytest.raises(CodeVerificationFailed):
+        OTPService.verify_signup_code("ada@example.com", reset_otp.code)
+    with pytest.raises(CodeVerificationFailed):
+        OTPService.verify_reset_code("ada@example.com", signup_otp.code)
+
+
+@pytest.mark.django_db
+def test_reset_code_for_an_account_deactivated_after_sending_is_refused():
+    user = create_user("ada@example.com")
+    otp = reset_code_for()
+    user.is_active = False
+    user.save()
+
+    with pytest.raises(CodeVerificationFailed) as error:
+        OTPService.verify_reset_code("ada@example.com", otp.code)
+
+    assert error.value.detail == {"error": NO_ACTIVE_CODE_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_verify_reset_code_endpoint_returns_token(api_client):
+    create_user("ada@example.com")
+    otp = reset_code_for()
+
+    response = api_client.post(VERIFY_RESET_URL, {"email": "ada@example.com", "code": otp.code}, format="json")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"message", "reset_token", "expires_in"}
+    assert body["message"] == RESET_CODE_VERIFIED_MESSAGE
+    assert body["expires_in"] == 15 * 60
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("body, field", [
+    ({"code": "123456"}, "email"),
+    ({"email": "ada@example.com"}, "code"),
+    ({"email": "ada@example.com", "code": "12ab56"}, "code"),
+])
+def test_verify_reset_code_endpoint_rejects_bad_input(api_client, body, field):
+    response = api_client.post(VERIFY_RESET_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert field in response.json()
+
+
+@pytest.mark.django_db
+def test_verify_reset_code_endpoint_counts_wrong_codes(api_client):
+    create_user("ada@example.com")
+    otp = reset_code_for()
+
+    response = api_client.post(VERIFY_RESET_URL, {"email": "ada@example.com", "code": wrong_code(otp)}, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": 2}
+
+
+@pytest.mark.django_db
+def test_reset_password_changes_password_and_ends_every_session(api_client):
+    user = create_user("ada@example.com")
+    old_refresh = login_tokens(api_client)["refresh"]
+    token = reset_token_for(user)
+
+    response = api_client.post(
+        RESET_URL,
+        {"reset_token": token, "new_password": NEW_PASSWORD, "re_enter_password": NEW_PASSWORD},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": PASSWORD_RESET_SUCCESS_MESSAGE}
+    user.refresh_from_db()
+    assert user.check_password(NEW_PASSWORD)
+    assert not user.check_password("Str0ng-Passw0rd!")
+    assert api_client.post(REFRESH_URL, {"refresh": old_refresh}, format="json").status_code == 401
+    new_login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": NEW_PASSWORD}, format="json")
+    assert new_login.status_code == 200
+
+
+@pytest.mark.django_db
+def test_reset_token_works_only_once(api_client):
+    user = create_user("ada@example.com")
+    token = reset_token_for(user)
+    body = {"reset_token": token, "new_password": NEW_PASSWORD, "re_enter_password": NEW_PASSWORD}
+
+    first = api_client.post(RESET_URL, body, format="json")
+    second = api_client.post(RESET_URL, {**body, "new_password": "Other-Harbor-2026!",
+                                         "re_enter_password": "Other-Harbor-2026!"}, format="json")
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+    assert second.json() == {"error": RESET_TOKEN_INVALID_MESSAGE}
+    user.refresh_from_db()
+    assert user.check_password(NEW_PASSWORD)
+
+
+@pytest.mark.django_db
+def test_expired_or_garbage_reset_token_is_refused(api_client, settings):
+    user = create_user("ada@example.com")
+    token = reset_token_for(user)
+    settings.PASSWORD_RESET_TIMEOUT = -1
+
+    for bad in (token, "garbage", "bm90LWEtdXVpZA:abc", ""):
+        response = api_client.post(
+            RESET_URL,
+            {"reset_token": bad, "new_password": NEW_PASSWORD, "re_enter_password": NEW_PASSWORD},
+            format="json",
+        )
+        assert response.status_code == 400
+    assert not User.objects.get(pk=user.pk).check_password(NEW_PASSWORD)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("new_password", ["short", "password123", "Ada Obi 1", "ada@example.com1"])
+def test_reset_password_refuses_weak_passwords(api_client, new_password):
+    user = create_user("ada@example.com")
+    token = reset_token_for(user)
+
+    response = api_client.post(
+        RESET_URL, {"reset_token": token, "new_password": new_password, "re_enter_password": new_password},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert "new_password" in response.json()
+    user.refresh_from_db()
+    assert user.check_password("Str0ng-Passw0rd!")
+
+
+@pytest.mark.django_db
+def test_reset_password_refuses_mismatched_passwords(api_client):
+    user = create_user("ada@example.com")
+
+    response = api_client.post(
+        RESET_URL,
+        {"reset_token": reset_token_for(user), "new_password": NEW_PASSWORD, "re_enter_password": "Different-2026!"},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"re_enter_password": ["Passwords do not match."]}
+
+
+@pytest.mark.django_db
+def test_signup_code_is_queued_with_the_original_two_arguments():
+    # Keeps signup emails working on a Celery worker that still runs the pre-reset code.
+    create_user("ada@example.com")
+    with patch("accounts.services.send_otp_email_task.delay") as delay:
+        OTPService.send_verification_code(NEW_EMAIL)
+        AuthService.forgot_password("ada@example.com")
+
+    signup_call, reset_call = delay.call_args_list
+    assert signup_call.args == (NEW_EMAIL, signup_call.args[1]) and signup_call.kwargs == {}
+    assert reset_call.kwargs == {"purpose": "password_reset"}
