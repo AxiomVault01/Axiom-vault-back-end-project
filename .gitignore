@@ -1,0 +1,23 @@
+# Environment files
+.env
+.env.*
+!.env.example
+*.env
+
+# Python virtual environment and test cache
+.venv/
+.pytest_cache/
+
+# Generated files
+__pycache__/
+*.pyc
+db.sqlite3
+celerybeat-schedule
+staticfiles/
+
+# AI Blueprint local workflow files
+blueprint/
+.claude/
+.agents/
+AGENTS.md
+CLAUDE.md
