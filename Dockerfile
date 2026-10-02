@@ -10,6 +10,9 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+# Collect admin and Swagger static files into the image; WhiteNoise serves them in production.
+RUN python manage.py collectstatic --noinput
+
 COPY entrypoint.sh /entrypoint.sh
 COPY celery-entrypoint.sh /celery-entrypoint.sh
 

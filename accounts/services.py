@@ -1,3 +1,4 @@
+import logging
 import math
 import secrets
 import string
@@ -21,7 +22,9 @@ from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from .models import OTP, User
-from .tasks import send_otp_email_task
+from .tasks import send_otp_email_task, send_password_changed_email_task
+
+logger = logging.getLogger(__name__)
 
 
 VERIFICATION_CODE_COOLDOWN_SECONDS = 60
@@ -49,6 +52,9 @@ RESET_CODE_LIFETIME = timedelta(minutes=10)
 RESET_CODE_VERIFIED_MESSAGE = "Code verified. You can now set a new password."
 RESET_TOKEN_INVALID_MESSAGE = "Your password reset has expired. Please request a new code."
 PASSWORD_RESET_SUCCESS_MESSAGE = "Password reset successfully. Please log in with your new password."
+PASSWORD_CHANGED_MESSAGE = "Password changed successfully."
+CURRENT_PASSWORD_INCORRECT_MESSAGE = "Your current password is incorrect."
+TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE = "Too many attempts. Please try again later."
 
 
 class SignupVerificationToken:
@@ -153,6 +159,39 @@ class LogoutWrongAccount(APIException):
     def __init__(self):
         super().__init__()
         self.detail = {"error": LOGOUT_WRONG_ACCOUNT_MESSAGE}
+
+
+def blacklist_all_refresh_tokens(user) -> None:
+    """Logs the user out everywhere: none of their unexpired refresh tokens can be used again."""
+    live = OutstandingToken.objects.filter(
+        user=user, expires_at__gt=timezone.now(), blacklistedtoken__isnull=True
+    )
+    # One insert for all tokens; a row already added by a concurrent logout is skipped.
+    BlacklistedToken.objects.bulk_create(
+        [BlacklistedToken(token=outstanding) for outstanding in live], ignore_conflicts=True
+    )
+
+
+HOW_CHANGED = "changed from your account settings"
+HOW_RESET = "reset with an emailed code"
+
+
+def notify_password_changed(user, how: str, device_info: dict) -> None:
+    """Emails the account owner that the password changed, once the change is saved.
+
+    Never blocks the change: if the email cannot be queued, only a warning is logged.
+    """
+    when = timezone.now().strftime("%d %b %Y, %H:%M UTC")
+
+    def queue():
+        try:
+            send_password_changed_email_task.delay(
+                user.email, when, how, device_info.get("device", "Unknown device"), device_info.get("ip", "Unknown")
+            )
+        except OperationalError:
+            logger.warning("Password-changed email could not be queued")
+
+    transaction.on_commit(queue)
 
 
 def stored_email_for(typed_email: str) -> str:
@@ -378,7 +417,32 @@ class AuthService:
             raise CodeDeliveryUnavailable()
 
     @staticmethod
-    def reset_password(reset_token: str, new_password: str) -> None:
+    def change_password(user, current_password: str, new_password: str, device_info: dict) -> dict:
+        """Changes a logged-in user's password, ends every session, and returns fresh tokens
+        for the device that made the change."""
+        # Checked first, so a caller without the current password learns nothing about the rules.
+        if not user.check_password(current_password):
+            raise ValidationError({"current_password": [CURRENT_PASSWORD_INCORRECT_MESSAGE]})
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as e:
+            raise ValidationError({"new_password": list(e.messages)})
+
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.save(update_fields=["password"])
+            blacklist_all_refresh_tokens(user)
+            refresh = RefreshToken.for_user(user)
+            notify_password_changed(user, HOW_CHANGED, device_info)
+
+        return {
+            "message": PASSWORD_CHANGED_MESSAGE,
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+        }
+
+    @staticmethod
+    def reset_password(reset_token: str, new_password: str, device_info: dict | None = None) -> None:
         """Sets the new password for the reset token's user and ends all of their sessions."""
         user = PasswordResetToken.read(reset_token)
         try:
@@ -392,9 +456,8 @@ class AuthService:
             OTP.objects.filter(email__iexact=user.email, purpose="password_reset", is_used=False).update(
                 is_used=True
             )
-            # Log out everywhere: every refresh token issued to this user can no longer be used.
-            for outstanding in OutstandingToken.objects.filter(user=user, blacklistedtoken__isnull=True):
-                BlacklistedToken.objects.get_or_create(token=outstanding)
+            blacklist_all_refresh_tokens(user)
+            notify_password_changed(user, HOW_RESET, device_info or {})
 
     @staticmethod
     def logout(user, refresh: str) -> None:

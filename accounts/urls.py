@@ -31,6 +31,7 @@ urlpatterns = [
     path("signup/", auth({"post": "signup"}), name="auth-signup"),
     path("login/", auth({"post": "login"}), name="auth-login"),
     path("logout/", auth({"post": "logout"}), name="auth-logout"),
+    path("change-password/", auth({"post": "change_password"}), name="auth-change-password"),
     path("token/refresh/", auth({"post": "token_refresh"}), name="auth-token-refresh"),
     
     # Password Recovery Endpoints
