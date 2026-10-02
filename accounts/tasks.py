@@ -11,12 +11,27 @@ class OTPEmailDeliveryError(Exception):
     """Raised instead of the SMTP error, whose text can contain the recipient address."""
 
 
+PASSWORD_RESET_EMAIL_SUBJECT = "Your AxiomVault password reset code"
+
+
+def otp_email_content(code, purpose):
+    """Returns (subject, body) for the code email; signup emails keep their original text."""
+    if purpose == "password_reset":
+        return PASSWORD_RESET_EMAIL_SUBJECT, (
+            f"Your password reset code is {code}.\n\n"
+            "It expires in 10 minutes.\n\n"
+            "If you did not ask to reset your password, ignore this email; your password stays the same."
+        )
+    return "Your AxiomVault Verification Code", f"Your OTP is {code}"
+
+
 @shared_task(bind=True)
-def send_otp_email_task(self, email, code):
+def send_otp_email_task(self, email, code, purpose="verification"):
+    subject, message = otp_email_content(code, purpose)
     try:
         send_mail(
-            subject="Your AxiomVault Verification Code",
-            message=f"Your OTP is {code}",
+            subject=subject,
+            message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
             fail_silently=False,

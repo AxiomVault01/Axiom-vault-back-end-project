@@ -9,7 +9,11 @@ from .services import (
     CODE_EXPIRED_MESSAGE,
     CODE_TOO_SOON_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
+    FORGOT_PASSWORD_MESSAGE,
     INVALID_CREDENTIALS_MESSAGE,
+    PASSWORD_RESET_SUCCESS_MESSAGE,
+    RESET_CODE_VERIFIED_MESSAGE,
+    RESET_TOKEN_INVALID_MESSAGE,
     DELIVERY_FAILED_MESSAGE,
     INCORRECT_CODE_MESSAGE,
     LOGOUT_SUCCESS_MESSAGE,
@@ -34,8 +38,11 @@ from .serializers import (
     LoginSerializer,
     LogoutSerializer,
     RefreshTokenSerializer,
+    ForgotPasswordSerializer,
+    VerifyResetCodeSerializer,
     ResetPasswordSerializer
 )
+from django.conf import settings
 
 SEND_OTP_SUCCESS_MESSAGE = "OTP verification code transmitted successfully."
 VERIFY_OTP_SUCCESS_MESSAGE = "OTP validation verified successfully."
@@ -89,6 +96,16 @@ TokenRefreshResponse = inline_serializer(
 )
 SignupResponse = inline_serializer(
     "SignupResponse", {"message": serializers.CharField(), "email": serializers.EmailField()}
+)
+ResetCodeVerifiedResponse = inline_serializer(
+    "ResetCodeVerifiedResponse",
+    {
+        "message": serializers.CharField(help_text="Confirmation text to show the user."),
+        "reset_token": serializers.CharField(
+            help_text="One-time token for `POST /api/v1/auth/reset-password/`. Keep it in memory only."
+        ),
+        "expires_in": serializers.IntegerField(help_text="Seconds until the reset token expires (900 = 15 minutes)."),
+    },
 )
 VerifiedResponse = inline_serializer(
     "VerifiedResponse",
@@ -529,26 +546,209 @@ class AuthViewSet(viewsets.ViewSet):
         result = AuthService.refresh_access_token(serializer.validated_data["refresh"])
         return Response(result, status=status.HTTP_200_OK)
 
-    @extend_schema(request=SendOTPSerializer, tags=["Auth"])
+    @extend_schema(
+        tags=["Auth"],
+        summary="Forgot password: email a reset code",
+        description=(
+            "**Step 1 of password reset** (the *Forgot Password* screen). Emails a 6-digit reset code "
+            "to the account. The code is valid for **10 minutes**. The next screen (*Enter Reset Code*) "
+            "sends it to `verify-reset-code`.\n\n"
+            "**Request field**\n"
+            "- `email` (required): the account's email. Letter case does not matter.\n\n"
+            "**The answer is always the same**\n"
+            "- Every valid request gets the same `200` message, whether or not an account exists. This "
+            "stops strangers from using this screen to find out which emails are registered. Always "
+            "move to the *Enter Reset Code* screen after a `200`.\n"
+            "- A code is only sent to an account that is verified and active. Accounts from the old "
+            "signup flow (unverified) must sign up again instead.\n\n"
+            "**Resending**\n"
+            f"- One code per account every **{VERIFICATION_CODE_COOLDOWN_SECONDS} seconds**. A request "
+            "inside that window still gets `200` but no new email is sent, and the earlier code stays "
+            "valid. Show your own 60-second *Resend code* countdown.\n"
+            "- A new code cancels the previous reset code. Sign-up codes are not affected.\n\n"
+            "**Responses**\n"
+            "- `200`: go to *Enter Reset Code*.\n"
+            "- `400`: the email field is missing or not a valid address.\n"
+            "- `503`: the email could not be queued; no code was created. Ask the user to try again "
+            "shortly.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
+        ),
+        request=ForgotPasswordSerializer,
+        examples=[OpenApiExample("Forgot password", value={"email": "juan@agency.gov"}, request_only=True)],
+        responses={
+            200: OpenApiResponse(
+                response=MessageResponse,
+                description="Same answer for every valid email.",
+                examples=[OpenApiExample("Request accepted", value={"message": FORGOT_PASSWORD_MESSAGE})],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="The email field is missing or invalid.",
+                examples=[
+                    OpenApiExample("Invalid email", value={"email": ["Enter a valid email address."]}),
+                    OpenApiExample("Missing email", value={"email": ["This field is required."]}),
+                ],
+            ),
+            503: OpenApiResponse(
+                response=ErrorResponse,
+                description="The email could not be queued. No code was created.",
+                examples=[OpenApiExample("Email unavailable", value={"error": DELIVERY_FAILED_MESSAGE})],
+            ),
+        },
+    )
     def forgot_password(self, request):
-        serializer = SendOTPSerializer(data=request.data)
+        serializer = ForgotPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        if AuthService.forgot_password(serializer.validated_data["email"]):
-            return Response({"message": "Password modification code dispatched."}, status=status.HTTP_200_OK)
-        return Response({"error": "No account tied to this email address."}, status=status.HTTP_404_NOT_FOUND)
+        AuthService.forgot_password(serializer.validated_data["email"])
+        return Response({"message": FORGOT_PASSWORD_MESSAGE}, status=status.HTTP_200_OK)
 
-    @extend_schema(request=ResetPasswordSerializer, tags=["Auth"])
+    @extend_schema(
+        tags=["Auth"],
+        summary="Verify a password reset code",
+        description=(
+            "**Step 2 of password reset** (the *Enter Reset Code* screen). Checks the newest reset code "
+            "sent to this email. On success returns a `reset_token` for the *Set New Password* screen.\n\n"
+            "**Request fields**\n"
+            "- `email` (required): the same email sent to `forgot-password`.\n"
+            "- `code` (required): the 6 digits from the email.\n\n"
+            "**Rules**\n"
+            f"- **{MAX_CODE_ATTEMPTS} wrong guesses** are allowed per code. Each wrong guess returns "
+            "`attempts_remaining`; after the last one the code is cancelled and the user must request a "
+            "new one from *Forgot Password*.\n"
+            "- A sign-up code cannot be used here, and a reset code cannot be used for sign-up.\n"
+            "- The `reset_token` works **once**, for **15 minutes** (`expires_in` seconds). It also stops "
+            "working if the user logs in or the password changes. Keep it in memory only and send it "
+            "to `reset-password`.\n\n"
+            "**Responses**\n"
+            "- `200`: code accepted; go to *Set New Password* with the `reset_token`.\n"
+            "- `400` *Incorrect code*: show the error and `attempts_remaining`; let the user retry.\n"
+            "- `400` *Too many attempts*, *Expired*, or *No active code*: send the user back to "
+            "*Forgot Password* to get a new code.\n"
+            "- `400` field errors: the email or code format is invalid.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
+        ),
+        request=VerifyResetCodeSerializer,
+        examples=[
+            OpenApiExample(
+                "Code from the email", value={"email": "juan@agency.gov", "code": "482913"}, request_only=True
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=ResetCodeVerifiedResponse,
+                description="Code accepted. Use the reset token on the Set New Password screen.",
+                examples=[
+                    OpenApiExample(
+                        "Code verified",
+                        value={
+                            "message": RESET_CODE_VERIFIED_MESSAGE,
+                            "reset_token": "M2YyYTdjOWUtMWI0ZC00ZThhLTljMmYtNmQ1ZTRiM2EyYzFk:cz8k1a-5f0e...",
+                            "expires_in": settings.PASSWORD_RESET_TIMEOUT,
+                        },
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Invalid input, or the code was wrong, expired, cancelled, or never sent.",
+                examples=[
+                    OpenApiExample("Invalid code format", value={"code": ["Enter the 6-digit code."]}),
+                    OpenApiExample("Wrong code", value={"error": INCORRECT_CODE_MESSAGE, "attempts_remaining": 2}),
+                    OpenApiExample("Too many attempts", value={"error": TOO_MANY_ATTEMPTS_MESSAGE}),
+                    OpenApiExample("Expired", value={"error": CODE_EXPIRED_MESSAGE}),
+                    OpenApiExample("No active code", value={"error": NO_ACTIVE_CODE_MESSAGE}),
+                ],
+            ),
+        },
+    )
+    def verify_reset_code(self, request):
+        serializer = VerifyResetCodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        reset_token = OTPService.verify_reset_code(
+            serializer.validated_data["email"], serializer.validated_data["code"]
+        )
+        return Response(
+            {
+                "message": RESET_CODE_VERIFIED_MESSAGE,
+                "reset_token": reset_token,
+                "expires_in": settings.PASSWORD_RESET_TIMEOUT,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @extend_schema(
+        tags=["Auth"],
+        summary="Set a new password with the reset token",
+        description=(
+            "**Step 3 of password reset** (the *Set New Password* screen). Sets the new password and "
+            "**logs the user out on every device**.\n\n"
+            "**Request fields**\n"
+            "- `reset_token` (required): from `verify-reset-code`. Works once, for 15 minutes.\n"
+            "- `new_password` (required): at least 8 characters, not a common password, not only "
+            "numbers, and not too similar to the email or name.\n"
+            "- `re_enter_password` (required): must match `new_password`.\n\n"
+            "**What happens on success**\n"
+            "- The password is changed and the reset token stops working.\n"
+            "- Every refresh token the user had is blacklisted, so all existing sessions end. Access "
+            "tokens already issued keep working until they expire (at most 30 minutes).\n"
+            "- Send the user to *Sign In* to log in with the new password.\n\n"
+            "**Responses**\n"
+            "- `200`: password changed; go to *Sign In*.\n"
+            "- `400` *reset expired*: the token is invalid, expired, or already used. Send the user back "
+            "to *Forgot Password*.\n"
+            "- `400` field errors: show them under the matching field (`new_password` lists every rule "
+            "that failed; `re_enter_password` when they differ). The token is still valid, so the user "
+            "can fix the password and submit again.\n\n"
+            "**Authentication:** none. Any `Authorization` header is ignored."
+        ),
+        request=ResetPasswordSerializer,
+        examples=[
+            OpenApiExample(
+                "New password",
+                value={
+                    "reset_token": "M2YyYTdjOWUtMWI0ZC00ZThhLTljMmYtNmQ1ZTRiM2EyYzFk:cz8k1a-5f0e...",
+                    "new_password": "Quiet-Harbor-2026!",
+                    "re_enter_password": "Quiet-Harbor-2026!",
+                },
+                request_only=True,
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=MessageResponse,
+                description="Password changed and all sessions ended.",
+                examples=[OpenApiExample("Password reset", value={"message": PASSWORD_RESET_SUCCESS_MESSAGE})],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Reset token unusable, or the new password was refused.",
+                examples=[
+                    OpenApiExample("Reset expired", value={"error": RESET_TOKEN_INVALID_MESSAGE}),
+                    OpenApiExample("Passwords differ", value={"re_enter_password": ["Passwords do not match."]}),
+                    OpenApiExample(
+                        "Weak password",
+                        value={
+                            "new_password": [
+                                "This password is too short. It must contain at least 8 characters.",
+                                "This password is too common.",
+                            ]
+                        },
+                    ),
+                    OpenApiExample("Missing field", value={"new_password": ["This field is required."]}),
+                ],
+            ),
+        },
+    )
     def reset_password(self, request):
         serializer = ResetPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         AuthService.reset_password(
-            email=serializer.validated_data["email"],
-            code=serializer.validated_data["otp_code"],
-            new_password=serializer.validated_data["new_password"]
+            serializer.validated_data["reset_token"], serializer.validated_data["new_password"]
         )
-        return Response({"message": "Password altered successfully."}, status=status.HTTP_200_OK)
+        return Response({"message": PASSWORD_RESET_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
 
     @extend_schema(
         tags=["Auth"],

@@ -6,21 +6,23 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from datetime import timedelta
-from django.contrib.auth import get_user_model, authenticate
+from django.contrib.auth import authenticate
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
 from django.core.signing import BadSignature, TimestampSigner
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from kombu.exceptions import OperationalError
 from rest_framework import status
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import OTP
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+from .models import OTP, User
 from .tasks import send_otp_email_task
 
-
-User = get_user_model()
 
 VERIFICATION_CODE_COOLDOWN_SECONDS = 60
 ACCOUNT_EXISTS_MESSAGE = "An account with this email already exists. Please sign in."
@@ -42,6 +44,11 @@ SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again."
 LOGOUT_SUCCESS_MESSAGE = "Logged out successfully."
 LOGOUT_TOKEN_INVALID_MESSAGE = "This session has already ended or the token is invalid."
 LOGOUT_WRONG_ACCOUNT_MESSAGE = "This refresh token belongs to a different account."
+FORGOT_PASSWORD_MESSAGE = "If an account exists for this email, a password reset code has been sent."
+RESET_CODE_LIFETIME = timedelta(minutes=10)
+RESET_CODE_VERIFIED_MESSAGE = "Code verified. You can now set a new password."
+RESET_TOKEN_INVALID_MESSAGE = "Your password reset has expired. Please request a new code."
+PASSWORD_RESET_SUCCESS_MESSAGE = "Password reset successfully. Please log in with your new password."
 
 
 class SignupVerificationToken:
@@ -57,6 +64,29 @@ class SignupVerificationToken:
             return TimestampSigner(salt=SIGNUP_TOKEN_SALT).unsign(token, max_age=SIGNUP_TOKEN_MAX_AGE_SECONDS)
         except BadSignature:
             raise ValidationError({"error": TOKEN_INVALID_MESSAGE})
+
+
+class PasswordResetToken:
+    """One-time proof that the user verified a reset code: "<base64 user id>:<Django reset token>".
+
+    Django's token expires after PASSWORD_RESET_TIMEOUT and stops working once the password
+    (or last_login) changes, so it can be used only once.
+    """
+
+    @staticmethod
+    def issue(user) -> str:
+        return f"{urlsafe_base64_encode(force_bytes(user.pk))}:{default_token_generator.make_token(user)}"
+
+    @staticmethod
+    def read(reset_token: str) -> User:
+        uidb64, _, token = reset_token.partition(":")
+        try:
+            user = User.objects.filter(pk=force_str(urlsafe_base64_decode(uidb64)), is_active=True).first()
+        except (ValueError, TypeError, OverflowError, DjangoValidationError):
+            user = None
+        if user is None or not default_token_generator.check_token(user, token):
+            raise ValidationError({"error": RESET_TOKEN_INVALID_MESSAGE})
+        return user
 
 
 class CodeRequestTooSoon(APIException):
@@ -160,11 +190,27 @@ class OTPService:
     @staticmethod
     def verify_signup_code(email: str, code: str) -> str:
         """Checks a sign-up code and returns a verification token; wrong guesses are counted."""
+        otp = OTPService._check_code(email, code, purpose="verification")
+        return SignupVerificationToken.issue(otp.email)
+
+    @staticmethod
+    def verify_reset_code(email: str, code: str) -> str:
+        """Checks a password-reset code and returns a one-time reset token."""
+        otp = OTPService._check_code(email, code, purpose="password_reset")
+        # The account may have been deactivated (or changed) after the code was sent.
+        user = User.objects.filter(email=otp.email, is_verified=True, is_active=True).first()
+        if user is None:
+            raise CodeVerificationFailed({"error": NO_ACTIVE_CODE_MESSAGE})
+        return PasswordResetToken.issue(user)
+
+    @staticmethod
+    def _check_code(email: str, code: str, purpose: str) -> OTP:
+        """Uses up the latest matching code, or counts a wrong guess and raises a 400."""
         error = None
         with transaction.atomic():
             otp = (
                 OTP.objects.select_for_update()
-                .filter(email__iexact=email, purpose="verification", is_used=False)
+                .filter(email__iexact=email, purpose=purpose, is_used=False)
                 .order_by("-created_at")
                 .first()
             )
@@ -190,10 +236,10 @@ class OTPService:
         # Raised after the block commits, so counted attempts and cancelled codes stay saved.
         if error:
             raise CodeVerificationFailed(error)
-        return SignupVerificationToken.issue(otp.email)
+        return otp
 
     @staticmethod
-    def generate(email: str, purpose="verification"):
+    def generate(email: str, purpose="verification", lifetime=timedelta(minutes=2)):
         OTP.objects.filter(
             email__iexact=email,
             purpose=purpose,
@@ -206,30 +252,15 @@ class OTPService:
             email=email,
             code=code,
             purpose=purpose,
-            expires_at=timezone.now() + timedelta(minutes=2)
+            expires_at=timezone.now() + lifetime
         )
 
-        send_otp_email_task.delay(
-            email,
-            code
-        )
+        # Signup emails keep the original two-argument call, so a worker still running older code
+        # (for example during a deploy) can send them.
+        extra = {} if purpose == "verification" else {"purpose": purpose}
+        send_otp_email_task.delay(email, code, **extra)
 
-        return code    
-    
-    @staticmethod
-    def verify(email: str, code: str, purpose: str = "verification") -> tuple[bool, str | None]:
-        otp_record = OTP.objects.filter(email=email, code=code, purpose=purpose).first()
-
-        if not otp_record:
-            return False, "Invalid validation code provided."
-        if otp_record.is_used:
-            return False, "This token has already been consumed."
-        if otp_record.is_expired:
-            return False, "Verification token code has expired."
-
-        otp_record.is_used = True
-        otp_record.save()
-        return True, None
+        return code
 
 
 class AuthService:
@@ -323,26 +354,47 @@ class AuthService:
         return {"access": str(token.access_token)}
 
     @staticmethod
-    def forgot_password(email: str) -> bool:
-        """Triggers a password recovery event if the target account exists."""
-        if User.objects.filter(email=email).exists():
-            OTPService.generate(email, purpose="password_reset")
-            return True
-        return False
+    def forgot_password(email: str) -> None:
+        """Emails a reset code to a verified, active account. Returns the same way for every
+        email, so the caller can always answer FORGOT_PASSWORD_MESSAGE without revealing accounts."""
+        matches = list(User.objects.filter(email__iexact=email, is_verified=True, is_active=True)[:2])
+        if len(matches) != 1:
+            return
+        user = matches[0]
 
-    @staticmethod
-    def reset_password(email: str, code: str, new_password: str):
-        """Verifies the reset code and updates account credentials safely."""
-        valid, error = OTPService.verify(email, code, purpose="password_reset")
-        if not valid:
-            raise ValidationError({"otp_code": error})
+        latest = (
+            OTP.objects.filter(email__iexact=user.email, purpose="password_reset")
+            .order_by("-created_at")
+            .first()
+        )
+        if latest and (timezone.now() - latest.created_at).total_seconds() < VERIFICATION_CODE_COOLDOWN_SECONDS:
+            # Silent cooldown: a 429 here would reveal that the account exists.
+            return
 
         try:
-            user = User.objects.get(email=email)
+            with transaction.atomic():
+                OTPService.generate(user.email, purpose="password_reset", lifetime=RESET_CODE_LIFETIME)
+        except OperationalError:
+            raise CodeDeliveryUnavailable()
+
+    @staticmethod
+    def reset_password(reset_token: str, new_password: str) -> None:
+        """Sets the new password for the reset token's user and ends all of their sessions."""
+        user = PasswordResetToken.read(reset_token)
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as e:
+            raise ValidationError({"new_password": list(e.messages)})
+
+        with transaction.atomic():
             user.set_password(new_password)
-            user.save()
-        except User.DoesNotExist:
-            raise ValidationError({"email": "Target account context missing."})
+            user.save(update_fields=["password"])
+            OTP.objects.filter(email__iexact=user.email, purpose="password_reset", is_used=False).update(
+                is_used=True
+            )
+            # Log out everywhere: every refresh token issued to this user can no longer be used.
+            for outstanding in OutstandingToken.objects.filter(user=user, blacklistedtoken__isnull=True):
+                BlacklistedToken.objects.get_or_create(token=outstanding)
 
     @staticmethod
     def logout(user, refresh: str) -> None:

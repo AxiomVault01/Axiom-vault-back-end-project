@@ -1,7 +1,6 @@
 from django.core.validators import RegexValidator
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
 
 User = get_user_model()
 
@@ -63,7 +62,38 @@ class LogoutSerializer(serializers.Serializer):
         help_text="The `refresh` token returned by login. It is blacklisted and can never be used again.",
     )
 
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(
+        required=True,
+        help_text="The email of the account whose password was forgotten. Letter case does not matter.",
+    )
+
+class VerifyResetCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField(
+        required=True, help_text="The same email that was sent to forgot-password."
+    )
+    code = serializers.CharField(
+        required=True,
+        validators=[RegexValidator(r"^[0-9]{6}$", message="Enter the 6-digit code.")],
+        help_text="The 6-digit code from the password reset email.",
+    )
+
 class ResetPasswordSerializer(serializers.Serializer):
-    email = serializers.EmailField(required=True)
-    otp_code = serializers.CharField(max_length=6, required=True)
-    new_password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    reset_token = serializers.CharField(
+        required=True, help_text="The `reset_token` returned by verify-reset-code. Works once, for 15 minutes."
+    )
+    # Strength is checked in AuthService.reset_password, where the user (email, name) is known.
+    new_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        help_text="The new password. At least 8 characters, not too common, not only numbers, "
+        "and not too similar to the email or name.",
+    )
+    re_enter_password = serializers.CharField(
+        write_only=True, required=True, help_text="The new password again. Must match `new_password`."
+    )
+
+    def validate(self, data):
+        if data["new_password"] != data["re_enter_password"]:
+            raise serializers.ValidationError({"re_enter_password": "Passwords do not match."})
+        return data

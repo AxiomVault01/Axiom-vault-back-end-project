@@ -35,6 +35,7 @@ urlpatterns = [
     
     # Password Recovery Endpoints
     path("forgot-password/", auth({"post": "forgot_password"}), name="auth-forgot-password"),
+    path("verify-reset-code/", auth({"post": "verify_reset_code"}), name="auth-verify-reset-code"),
     path("reset-password/", auth({"post": "reset_password"}), name="auth-reset-password"),
 
     # Direct Multi-Factor / OTP Flow Endpoints

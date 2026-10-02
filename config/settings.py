@@ -226,6 +226,9 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 
+# Lifetime of the one-time token returned by verify-reset-code (Django's password-reset token).
+PASSWORD_RESET_TIMEOUT = 15 * 60
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
