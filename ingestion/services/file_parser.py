@@ -1,10 +1,11 @@
-import pandas as pd
-
-
 class FileParser:
 
     @staticmethod
     def parse(file):
+        # Imported here, not at the top: pandas (with numpy) adds tens of MB to every web
+        # process, and it is only needed when a payroll file is actually uploaded.
+        import pandas as pd
+
         name = file.name.lower()
 
         if name.endswith(".csv"):
