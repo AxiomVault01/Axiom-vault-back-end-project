@@ -226,9 +226,8 @@ STATIC_URL = "/static/"
 
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, "static"),
-]
+# The project has no static files of its own; the admin and Swagger files come from
+# their apps through collectstatic. Add STATICFILES_DIRS back if a static/ folder is created.
 
 # =====================
 # DRF + JWT
