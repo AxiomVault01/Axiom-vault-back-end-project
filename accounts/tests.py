@@ -10,6 +10,7 @@ from django.utils import timezone
 from kombu.exceptions import OperationalError
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from accounts.models import OTP
@@ -19,6 +20,9 @@ from accounts.services import (
     EMAIL_NOT_VERIFIED_MESSAGE,
     INVALID_CREDENTIALS_MESSAGE,
     INCORRECT_CODE_MESSAGE,
+    LOGOUT_SUCCESS_MESSAGE,
+    LOGOUT_TOKEN_INVALID_MESSAGE,
+    LOGOUT_WRONG_ACCOUNT_MESSAGE,
     NO_ACTIVE_CODE_MESSAGE,
     SESSION_EXPIRED_MESSAGE,
     SIGNUP_SUCCESS_MESSAGE,
@@ -29,6 +33,8 @@ from accounts.services import (
     AuthService,
     CodeVerificationFailed,
     InvalidRefreshToken,
+    LogoutTokenInvalid,
+    LogoutWrongAccount,
     OTPService,
     SignupVerificationToken,
 )
@@ -779,13 +785,13 @@ def test_public_endpoints_ignore_a_stale_authorization_header(api_client):
 @pytest.mark.django_db
 def test_access_token_authenticates_a_protected_request(api_client):
     create_user("ada@example.com")
-    access = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json").json()["access"]
+    tokens = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json").json()
 
-    anonymous = api_client.post(LOGOUT_URL, format="json")
-    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
-    authenticated = api_client.post(LOGOUT_URL, format="json")
+    anonymous = api_client.post(LOGOUT_URL, {"refresh": tokens["refresh"]}, format="json")
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+    authenticated = api_client.post(LOGOUT_URL, {"refresh": tokens["refresh"]}, format="json")
 
-    assert anonymous.status_code == 400
+    assert anonymous.status_code == 401
     assert authenticated.status_code == 200
 
 
@@ -867,7 +873,7 @@ def test_refresh_endpoint_returns_access_token_that_authenticates(api_client):
     assert response.status_code == 200
     assert set(response.json()) == {"access"}
     api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.json()['access']}")
-    assert api_client.post(LOGOUT_URL, format="json").status_code == 200
+    assert api_client.post(LOGOUT_URL, {"refresh": refresh}, format="json").status_code == 200
 
 
 @pytest.mark.django_db
@@ -905,3 +911,143 @@ def test_refresh_endpoint_ignores_a_stale_authorization_header(api_client):
     response = api_client.post(REFRESH_URL, {"refresh": str(RefreshToken.for_user(user))}, format="json")
 
     assert response.status_code == 200
+
+
+# --- 3c: logout blacklists the refresh token ---
+
+
+def login_tokens(api_client, email="ada@example.com"):
+    return api_client.post(LOGIN_URL, {"email": email, "password": "Str0ng-Passw0rd!"}, format="json").json()
+
+
+@pytest.mark.django_db
+def test_login_records_the_refresh_token_as_outstanding(api_client):
+    user = create_user("ada@example.com")
+
+    refresh = login_tokens(api_client)["refresh"]
+
+    assert OutstandingToken.objects.filter(user=user, jti=RefreshToken(refresh)["jti"]).count() == 1
+
+
+@pytest.mark.django_db
+def test_refresh_endpoint_refuses_a_blacklisted_token(api_client):
+    user = create_user()
+    token = RefreshToken.for_user(user)
+    token.blacklist()
+
+    response = api_client.post(REFRESH_URL, {"refresh": str(token)}, format="json")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": SESSION_EXPIRED_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_logout_blacklists_the_callers_refresh_token():
+    user = create_user()
+    token = RefreshToken.for_user(user)
+
+    AuthService.logout(user, str(token))
+
+    assert BlacklistedToken.objects.filter(token__jti=token["jti"]).exists()
+
+
+@pytest.mark.django_db
+def test_logout_twice_with_the_same_token_is_refused():
+    user = create_user()
+    refresh = str(RefreshToken.for_user(user))
+    AuthService.logout(user, refresh)
+
+    with pytest.raises(LogoutTokenInvalid) as error:
+        AuthService.logout(user, refresh)
+
+    assert error.value.detail == {"error": LOGOUT_TOKEN_INVALID_MESSAGE}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("make_token", [
+    expired_refresh_for,
+    lambda user: "not-a-jwt",
+    lambda user: str(RefreshToken.for_user(user).access_token),
+], ids=["expired", "garbage", "access-token"])
+def test_logout_refuses_unusable_tokens(make_token):
+    user = create_user()
+
+    with pytest.raises(LogoutTokenInvalid):
+        AuthService.logout(user, make_token(user))
+
+    assert not BlacklistedToken.objects.exists()
+
+
+@pytest.mark.django_db
+def test_logout_refuses_another_users_refresh_token():
+    user = create_user()
+    other = RefreshToken.for_user(create_user("other@example.com"))
+
+    with pytest.raises(LogoutWrongAccount) as error:
+        AuthService.logout(user, str(other))
+
+    assert error.value.detail == {"error": LOGOUT_WRONG_ACCOUNT_MESSAGE}
+    assert not BlacklistedToken.objects.filter(token__jti=other["jti"]).exists()
+
+
+@pytest.mark.django_db
+def test_logout_endpoint_blocks_the_refresh_token(api_client):
+    create_user("ada@example.com")
+    tokens = login_tokens(api_client)
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+
+    response = api_client.post(LOGOUT_URL, {"refresh": tokens["refresh"]}, format="json")
+    again = api_client.post(LOGOUT_URL, {"refresh": tokens["refresh"]}, format="json")
+    api_client.credentials()
+    refreshed = api_client.post(REFRESH_URL, {"refresh": tokens["refresh"]}, format="json")
+
+    assert response.status_code == 200
+    assert response.json() == {"message": LOGOUT_SUCCESS_MESSAGE}
+    assert again.status_code == 400
+    assert again.json() == {"error": LOGOUT_TOKEN_INVALID_MESSAGE}
+    assert refreshed.status_code == 401
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("body, expected", [
+    ({}, {"refresh": ["This field is required."]}),
+    ({"refresh": ""}, {"refresh": ["This field may not be blank."]}),
+    ({"refresh": "not-a-jwt"}, {"error": LOGOUT_TOKEN_INVALID_MESSAGE}),
+])
+def test_logout_endpoint_rejects_bad_body(api_client, body, expected):
+    create_user("ada@example.com")
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_tokens(api_client)['access']}")
+
+    response = api_client.post(LOGOUT_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("header", [None, "Bearer not-a-jwt"], ids=["no-header", "garbage-access"])
+def test_logout_endpoint_requires_a_valid_access_token(api_client, header):
+    create_user("ada@example.com")
+    refresh = login_tokens(api_client)["refresh"]
+    if header:
+        api_client.credentials(HTTP_AUTHORIZATION=header)
+
+    response = api_client.post(LOGOUT_URL, {"refresh": refresh}, format="json")
+
+    assert response.status_code == 401
+    assert "detail" in response.json()
+    assert not BlacklistedToken.objects.exists()
+
+
+@pytest.mark.django_db
+def test_logout_endpoint_refuses_another_accounts_refresh_token(api_client):
+    create_user("ada@example.com")
+    create_user("other@example.com")
+    other_refresh = login_tokens(api_client, "other@example.com")["refresh"]
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_tokens(api_client)['access']}")
+
+    response = api_client.post(LOGOUT_URL, {"refresh": other_refresh}, format="json")
+
+    assert response.status_code == 403
+    assert response.json() == {"error": LOGOUT_WRONG_ACCOUNT_MESSAGE}
+    assert not BlacklistedToken.objects.exists()

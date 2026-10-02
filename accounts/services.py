@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from datetime import timedelta
-from django.contrib.auth import get_user_model, authenticate, logout as django_logout
+from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.password_validation import validate_password
 from django.core.signing import BadSignature, TimestampSigner
@@ -39,6 +39,9 @@ SIGNUP_SUCCESS_MESSAGE = "Account created successfully. You can now sign in."
 INVALID_CREDENTIALS_MESSAGE = "Invalid email or password."
 EMAIL_NOT_VERIFIED_MESSAGE = "Your email is not verified. Please sign up again to verify your email."
 SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again."
+LOGOUT_SUCCESS_MESSAGE = "Logged out successfully."
+LOGOUT_TOKEN_INVALID_MESSAGE = "This session has already ended or the token is invalid."
+LOGOUT_WRONG_ACCOUNT_MESSAGE = "This refresh token belongs to a different account."
 
 
 class SignupVerificationToken:
@@ -104,6 +107,22 @@ class InvalidRefreshToken(APIException):
     def __init__(self):
         super().__init__()
         self.detail = {"error": SESSION_EXPIRED_MESSAGE}
+
+
+class LogoutTokenInvalid(APIException):
+    status_code = status.HTTP_400_BAD_REQUEST
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": LOGOUT_TOKEN_INVALID_MESSAGE}
+
+
+class LogoutWrongAccount(APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": LOGOUT_WRONG_ACCOUNT_MESSAGE}
 
 
 def stored_email_for(typed_email: str) -> str:
@@ -326,8 +345,15 @@ class AuthService:
             raise ValidationError({"email": "Target account context missing."})
 
     @staticmethod
-    def logout(request):
-        """Safely terminates an active authenticated session."""
-        if not request.user.is_authenticated:
-            raise ValidationError({"detail": "No active authentication active."})
-        django_logout(request)
+    def logout(user, refresh: str) -> None:
+        """Blacklists the caller's refresh token so it can no longer be used."""
+        try:
+            # Also rejects a token that is already blacklisted (logged out before).
+            token = RefreshToken(refresh)
+        except TokenError:
+            raise LogoutTokenInvalid()
+
+        if str(token.payload.get(jwt_settings.USER_ID_CLAIM)) != str(user.pk):
+            raise LogoutWrongAccount()
+
+        token.blacklist()
