@@ -44,8 +44,12 @@ class SignupSerializer(serializers.Serializer):
         return data
 
 class LoginSerializer(serializers.Serializer):
-    email = serializers.EmailField(required=True)
-    password = serializers.CharField(write_only=True, required=True)
+    email = serializers.EmailField(
+        required=True, help_text="The account's email address. Letter case does not matter."
+    )
+    password = serializers.CharField(
+        write_only=True, required=True, help_text="The account's password."
+    )
 
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)

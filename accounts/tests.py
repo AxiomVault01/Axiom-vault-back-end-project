@@ -10,11 +10,14 @@ from django.utils import timezone
 from kombu.exceptions import OperationalError
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from accounts.models import OTP
 from accounts.services import (
     ACCOUNT_EXISTS_MESSAGE,
     CODE_EXPIRED_MESSAGE,
+    EMAIL_NOT_VERIFIED_MESSAGE,
+    INVALID_CREDENTIALS_MESSAGE,
     INCORRECT_CODE_MESSAGE,
     NO_ACTIVE_CODE_MESSAGE,
     SIGNUP_SUCCESS_MESSAGE,
@@ -34,7 +37,7 @@ User = get_user_model()
 NEW_EMAIL = "auditor@agency.gov"
 
 
-def create_user(email="ada@example.com"):
+def create_user(email="ada@example.com", is_verified=True, **extra):
     return User.objects.create_user(
         username=email.split("@")[0],
         email=email,
@@ -43,6 +46,8 @@ def create_user(email="ada@example.com"):
         organization="Axiom",
         department="operations",
         role="fraud_analyst",
+        is_verified=is_verified,
+        **extra,
     )
 
 
@@ -52,7 +57,10 @@ def age_codes(email, seconds):
 
 @pytest.mark.django_db
 def test_new_user_is_unverified_and_password_is_hashed():
-    user = create_user()
+    user = User.objects.create_user(
+        username="ada", email="ada@example.com", password="Str0ng-Passw0rd!",
+        full_name="Ada Obi", organization="Axiom", department="operations", role="fraud_analyst",
+    )
 
     assert user.is_verified is False
     assert user.password != "Str0ng-Passw0rd!"
@@ -610,3 +618,170 @@ def test_full_registration_flow_through_the_api(api_client):
     user = User.objects.get(email=NEW_EMAIL)
     assert user.is_verified is True
     assert user.role == ""
+
+
+# ---- 3a: F-05, legacy accounts, login ----
+
+@pytest.mark.django_db
+def test_signup_rejects_password_similar_to_the_full_name():
+    data = signup_data(full_name="Juandelacruz Santos", password="JuandelacruzSantos", re_enter_password="JuandelacruzSantos")
+
+    with pytest.raises(ValidationError) as excinfo:
+        AuthService.signup(data)
+
+    assert "password" in excinfo.value.detail
+
+
+@pytest.mark.django_db
+def test_unverified_legacy_account_can_get_a_signup_code():
+    create_user("Legacy.User@Example.com", is_verified=False)
+
+    OTPService.send_verification_code("legacy.user@example.com")
+
+    assert OTP.objects.filter(email="legacy.user@example.com").count() == 1
+
+
+@pytest.mark.django_db
+def test_signup_replaces_unverified_legacy_account_in_place():
+    legacy = create_user("Legacy.User@Example.com", is_verified=False)
+
+    user = AuthService.signup(signup_data("legacy.user@example.com", department="finance"))
+
+    assert user.id == legacy.id
+    assert User.objects.count() == 1
+    user.refresh_from_db()
+    assert user.email == "legacy.user@example.com"
+    assert user.is_verified is True
+    assert user.role == ""
+    assert user.department == "finance"
+    assert user.check_password(GOOD_PASSWORD)
+    assert not user.check_password("Str0ng-Passw0rd!")
+
+
+@pytest.mark.django_db
+def test_verified_account_still_blocks_send_otp_and_signup():
+    create_user("ada@example.com")
+
+    with pytest.raises(ValidationError):
+        OTPService.send_verification_code("ada@example.com")
+    with pytest.raises(ValidationError):
+        AuthService.signup(signup_data("ada@example.com"))
+
+
+LOGIN_URL = "/api/v1/auth/login/"
+LOGOUT_URL = "/api/v1/auth/logout/"
+
+
+@pytest.mark.django_db
+def test_login_returns_tokens_and_profile():
+    user = create_user("ada@example.com")
+
+    result = AuthService.login(None, "ada@example.com", "Str0ng-Passw0rd!")
+
+    assert str(AccessToken(result["access"])["user_id"]) == str(user.id)
+    assert str(RefreshToken(result["refresh"])["user_id"]) == str(user.id)
+    assert result["user"] == {
+        "id": str(user.id),
+        "email": "ada@example.com",
+        "full_name": "Ada Obi",
+        "organization": "Axiom",
+        "department": "operations",
+        "role": "fraud_analyst",
+    }
+    user.refresh_from_db()
+    assert user.last_login is not None
+
+
+@pytest.mark.django_db
+def test_login_accepts_email_in_any_letter_case():
+    create_user("Mixed.Case@Example.com")
+
+    stored = User.objects.get().email
+
+    result = AuthService.login(None, "mixed.case@EXAMPLE.com", "Str0ng-Passw0rd!")
+
+    assert result["user"]["email"] == stored
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("email, password", [("ada@example.com", "wrong-password"), ("nobody@example.com", "Str0ng-Passw0rd!")])
+def test_login_wrong_password_and_unknown_email_look_the_same(api_client, email, password):
+    create_user("ada@example.com")
+
+    response = api_client.post(LOGIN_URL, {"email": email, "password": password}, format="json")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": INVALID_CREDENTIALS_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_login_refuses_deactivated_account(api_client):
+    create_user("ada@example.com", is_active=False)
+
+    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": INVALID_CREDENTIALS_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_login_unverified_account_gets_403_only_with_the_right_password(api_client):
+    create_user("legacy@example.com", is_verified=False)
+
+    right = api_client.post(LOGIN_URL, {"email": "legacy@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+    wrong = api_client.post(LOGIN_URL, {"email": "legacy@example.com", "password": "nope-nope-nope"}, format="json")
+
+    assert right.status_code == 403
+    assert right.json() == {"error": EMAIL_NOT_VERIFIED_MESSAGE}
+    assert wrong.status_code == 401
+
+
+@pytest.mark.django_db
+def test_login_endpoint_returns_200_body(api_client):
+    create_user("ada@example.com")
+
+    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"access", "refresh", "user"}
+    assert body["user"]["email"] == "ada@example.com"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "body, field",
+    [({"password": "x"}, "email"), ({"email": "ada@example.com"}, "password"), ({"email": "nope", "password": "x"}, "email")],
+)
+def test_login_endpoint_rejects_bad_input(api_client, body, field):
+    response = api_client.post(LOGIN_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert field in response.json()
+
+
+@pytest.mark.django_db
+def test_public_endpoints_ignore_a_stale_authorization_header(api_client):
+    create_user("ada@example.com")
+    api_client.credentials(HTTP_AUTHORIZATION="Bearer expired-or-garbage")
+
+    login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+    signup = api_client.post(SIGNUP_URL, signup_data("new.person@example.com"), format="json")
+    send = api_client.post(SEND_OTP_URL, {"email": "another@example.com"}, format="json")
+
+    assert login.status_code == 200
+    assert signup.status_code == 201
+    assert send.status_code == 200
+
+
+@pytest.mark.django_db
+def test_access_token_authenticates_a_protected_request(api_client):
+    create_user("ada@example.com")
+    access = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json").json()["access"]
+
+    anonymous = api_client.post(LOGOUT_URL, format="json")
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+    authenticated = api_client.post(LOGOUT_URL, format="json")
+
+    assert anonymous.status_code == 400
+    assert authenticated.status_code == 200
