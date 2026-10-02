@@ -1,10 +1,13 @@
 import math
 import secrets
 import string
-from django.db import transaction
+import uuid
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from datetime import timedelta
 from django.contrib.auth import get_user_model, authenticate, login as django_login, logout as django_logout
+from django.contrib.auth.password_validation import validate_password
 from django.core.signing import BadSignature, TimestampSigner
 from kombu.exceptions import OperationalError
 from rest_framework import status
@@ -28,6 +31,7 @@ CODE_EXPIRED_MESSAGE = "This code has expired. Please request a new code."
 INCORRECT_CODE_MESSAGE = "Incorrect code."
 TOO_MANY_ATTEMPTS_MESSAGE = "Too many incorrect attempts. Please request a new code."
 TOKEN_INVALID_MESSAGE = "Your email verification has expired. Please verify your email again."
+SIGNUP_SUCCESS_MESSAGE = "Account created successfully. You can now sign in."
 
 
 class SignupVerificationToken:
@@ -174,24 +178,33 @@ class AuthService:
 
     @staticmethod
     def signup(validated_data: dict) -> User:
-        """Handles the complete user onboarding and initial verification trigger."""
-        email = validated_data["email"]
-        base_username = email.split('@')[0]
+        """Creates a verified account for the email proven by the verification token."""
+        email = SignupVerificationToken.read(validated_data["verification_token"]).lower()
 
-        user = User.objects.create_user(
-            username=base_username,
-            email=email,
-            password=validated_data["password"],
-            full_name=validated_data["full_name"],
-            organization=validated_data["organization"],
-            department=validated_data["department"],
-            role=validated_data["role"],
-            is_verified=False
-        )
-        
-        # Fire off verification token
-        OTPService.generate(user.email, purpose="verification")
-        return user
+        if User.objects.filter(email__iexact=email).exists():
+            raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
+
+        password = validated_data["password"]
+        try:
+            validate_password(password, user=User(email=email, full_name=validated_data["full_name"]))
+        except DjangoValidationError as exc:
+            raise ValidationError({"password": list(exc.messages)})
+
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    username=uuid.uuid4().hex,
+                    email=email,
+                    password=password,
+                    full_name=validated_data["full_name"],
+                    organization=validated_data["organization"],
+                    department=validated_data["department"],
+                    role="",
+                    is_verified=True,
+                )
+        except IntegrityError:
+            # Two signups for the same email at once: the unique email constraint stops the second.
+            raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
     @staticmethod
     def login(request, email: str, password: str) -> User:

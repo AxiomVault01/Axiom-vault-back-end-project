@@ -12,36 +12,31 @@ class VerifyOTPSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     code = serializers.CharField(
         required=True,
-        validators=[RegexValidator(r"^\d{6}$", message="Enter the 6-digit code.")],
+        validators=[RegexValidator(r"^[0-9]{6}$", message="Enter the 6-digit code.")],
     )
 
 class ResendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
 
-class SignupSerializer(serializers.Serializer):
-    full_name = serializers.CharField(max_length=255, required=True)
-    email = serializers.EmailField(required=True)
-    organization = serializers.CharField(max_length=255, required=True)
-    
-    # Dropdowns pulling directly from the available model constraints
-    role = serializers.ChoiceField(choices=User.ROLE_CHOICES, required=True)
-    department = serializers.ChoiceField(
-        choices=[
-            ("operations", "Operations"), 
-            ("compliance", "Compliance"), 
-            ("risk", "Risk Assessment"), 
-            ("management", "Management")
-        ], 
-        required=True
-    )
-    
-    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
-    re_enter_password = serializers.CharField(write_only=True, required=True)
+DEPARTMENT_CHOICES = [
+    ("internal_audit", "Internal Audit"),
+    ("finance", "Finance"),
+    ("compliance", "Compliance"),
+    ("risk_management", "Risk Management"),
+    ("human_resources", "Human Resources"),
+    ("others", "Others"),
+]
 
-    def validate_email(self, value):
-        if User.objects.filter(email=value).exists():
-            raise serializers.ValidationError("An account with this email address already exists.")
-        return value
+
+class SignupSerializer(serializers.Serializer):
+    verification_token = serializers.CharField(required=True)
+    full_name = serializers.CharField(max_length=255, required=True)
+    organization = serializers.CharField(max_length=255, required=True)
+    department = serializers.ChoiceField(choices=DEPARTMENT_CHOICES, required=True)
+
+    # Strength is checked in AuthService.signup, where the email and name are known.
+    password = serializers.CharField(write_only=True, required=True)
+    re_enter_password = serializers.CharField(write_only=True, required=True)
 
     def validate(self, data):
         if data['password'] != data['re_enter_password']:

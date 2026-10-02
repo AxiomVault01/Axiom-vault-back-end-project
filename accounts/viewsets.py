@@ -3,7 +3,6 @@ from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
-from django.contrib.auth import get_user_model
 from .services import (
     ACCOUNT_EXISTS_MESSAGE,
     CODE_EXPIRED_MESSAGE,
@@ -12,7 +11,9 @@ from .services import (
     INCORRECT_CODE_MESSAGE,
     MAX_CODE_ATTEMPTS,
     NO_ACTIVE_CODE_MESSAGE,
+    SIGNUP_SUCCESS_MESSAGE,
     SIGNUP_TOKEN_MAX_AGE_SECONDS,
+    TOKEN_INVALID_MESSAGE,
     TOO_MANY_ATTEMPTS_MESSAGE,
     VERIFICATION_CODE_COOLDOWN_SECONDS,
     OTPService,
@@ -27,8 +28,6 @@ from .serializers import (
     ResetPasswordSerializer
 )
 
-User = get_user_model()
-
 SEND_OTP_SUCCESS_MESSAGE = "OTP verification code transmitted successfully."
 VERIFY_OTP_SUCCESS_MESSAGE = "OTP validation verified successfully."
 RESEND_OTP_SUCCESS_MESSAGE = "A fresh OTP code has been issued."
@@ -38,6 +37,9 @@ ErrorResponse = inline_serializer("ErrorResponse", {"error": serializers.CharFie
 RetryErrorResponse = inline_serializer(
     "RetryErrorResponse",
     {"error": serializers.CharField(), "retry_after": serializers.IntegerField()},
+)
+SignupResponse = inline_serializer(
+    "SignupResponse", {"message": serializers.CharField(), "email": serializers.EmailField()}
 )
 VerifiedResponse = inline_serializer(
     "VerifiedResponse",
@@ -156,12 +158,10 @@ class AuthViewSet(viewsets.ViewSet):
     def verify_otp(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"]
+        token = OTPService.verify_signup_code(
+            serializer.validated_data["email"], serializer.validated_data["code"]
+        )
 
-        token = OTPService.verify_signup_code(email, serializer.validated_data["code"])
-
-        # Accounts made by the old signup-first flow still get marked verified until 2c replaces it.
-        User.objects.filter(email__iexact=email).update(is_verified=True)
         return Response(
             {
                 "message": VERIFY_OTP_SUCCESS_MESSAGE,
@@ -192,15 +192,69 @@ class AuthViewSet(viewsets.ViewSet):
         OTPService.send_verification_code(serializer.validated_data["email"])
         return Response({"message": RESEND_OTP_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
 
-    @extend_schema(request=SignupSerializer, tags=["Auth"])
+    @extend_schema(
+        tags=["Auth"],
+        summary="Create an account (complete registration)",
+        description=(
+            "Step 3 of email-first registration (the 'Create Your Account' form). Send the "
+            "`verification_token` from verify-otp with the form fields; the account's email is "
+            "taken from the token and stored in lowercase. The token is valid for "
+            f"{SIGNUP_TOKEN_MAX_AGE_SECONDS // 60} minutes after verification. New accounts are "
+            "verified and have no role until an admin assigns one. Passwords need at least 8 "
+            "characters, must not be too common, all numbers, or too similar to the name or "
+            "email. No authentication required."
+        ),
+        request=SignupSerializer,
+        examples=[
+            OpenApiExample(
+                "Registration form",
+                value={
+                    "verification_token": "<verification_token from verify-otp>",
+                    "full_name": "Juan dela Cruz",
+                    "organization": "Agency Name",
+                    "department": "internal_audit",
+                    "password": "Str0ng-Passw0rd!",
+                    "re_enter_password": "Str0ng-Passw0rd!",
+                },
+                request_only=True,
+            ),
+        ],
+        responses={
+            201: OpenApiResponse(
+                response=SignupResponse,
+                description="Account created. Send the user to Sign In.",
+                examples=[
+                    OpenApiExample(
+                        "Created",
+                        value={"message": SIGNUP_SUCCESS_MESSAGE, "email": "juan@agency.gov"},
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Invalid form fields, weak password, bad or expired token, or the email already has an account.",
+                examples=[
+                    OpenApiExample("Missing field", value={"full_name": ["This field is required."]}),
+                    OpenApiExample("Unknown department", value={"department": ['"hr" is not a valid choice.']}),
+                    OpenApiExample("Passwords differ", value={"re_enter_password": ["Passwords do not match."]}),
+                    OpenApiExample(
+                        "Weak password",
+                        value={"password": ["This password is too short. It must contain at least 8 characters."]},
+                    ),
+                    OpenApiExample("Token invalid or expired", value={"error": TOKEN_INVALID_MESSAGE}),
+                    OpenApiExample("Account exists", value={"error": ACCOUNT_EXISTS_MESSAGE}),
+                ],
+            ),
+        },
+    )
     def signup(self, request):
         serializer = SignupSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
-        AuthService.signup(serializer.validated_data)
+
+        user = AuthService.signup(serializer.validated_data)
         return Response(
-            {"message": "Account created successfully. A verification code has been dispatched."},
-            status=status.HTTP_201_CREATED
+            {"message": SIGNUP_SUCCESS_MESSAGE, "email": user.email},
+            status=status.HTTP_201_CREATED,
         )
 
     @extend_schema(request=LoginSerializer, tags=["Auth"])
