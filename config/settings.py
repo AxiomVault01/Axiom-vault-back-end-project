@@ -3,9 +3,16 @@ from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 
 # Place this inside your settings.py file
 APPEND_SLASH = True
+
+
+def env_list(name, default):
+    """A comma-separated environment variable as a list; `default` when it is unset or empty."""
+    items = [item.strip() for item in os.getenv(name, "").split(",") if item.strip()]
+    return items or list(default)
 
 
 # =====================
@@ -18,7 +25,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # =====================
 # SECURITY
 # =====================
-SECRET_KEY = os.getenv("SECRET_KEY", "unsafe-secret-key")
+SECRET_KEY = os.getenv("SECRET_KEY") or "unsafe-secret-key"
+
+# In production a missing key must stop the app, not fall back to a public default that
+# would let anyone forge login tokens. Local and test runs keep the default.
+if os.getenv("ENV") == "prod" and SECRET_KEY == "unsafe-secret-key":
+    raise ImproperlyConfigured("SECRET_KEY must be set when ENV=prod.")
 
 # DEBUG = True
 # DEBUG = os.getenv("DEBUG") == "1"
@@ -95,6 +107,8 @@ MIDDLEWARE = [
 
 
     "django.middleware.security.SecurityMiddleware",
+    # Serves the collected static files (admin, Swagger assets) when DEBUG is False.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -235,12 +249,12 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:8000",
-    "https://onrender.com", # 👈 Add your live frontend domain when ready
-]
+# Frontend origins allowed to call the API from a browser. On Render set
+# CORS_ALLOWED_ORIGINS to a comma-separated list, e.g. "https://app.example.com".
+CORS_ALLOWED_ORIGINS = env_list(
+    "CORS_ALLOWED_ORIGINS",
+    ["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"],
+)
 
 CORS_ALLOW_CREDENTIALS = True
 

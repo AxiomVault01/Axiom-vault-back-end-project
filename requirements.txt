@@ -17,3 +17,5 @@ redis==6.2.0
 Pillow==11.3.0
 django-celery-beat==2.7.0
 drf-spectacular==0.27.2
+user-agents==2.2.0
+ua-parser==1.0.2

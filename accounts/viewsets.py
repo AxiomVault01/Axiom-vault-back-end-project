@@ -1,4 +1,7 @@
+import math
+
 from rest_framework import viewsets, status
+from rest_framework.exceptions import Throttled
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
@@ -9,8 +12,11 @@ from .services import (
     CODE_EXPIRED_MESSAGE,
     CODE_TOO_SOON_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
+    CURRENT_PASSWORD_INCORRECT_MESSAGE,
     FORGOT_PASSWORD_MESSAGE,
     INVALID_CREDENTIALS_MESSAGE,
+    PASSWORD_CHANGED_MESSAGE,
+    TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE,
     PASSWORD_RESET_SUCCESS_MESSAGE,
     RESET_CODE_VERIFIED_MESSAGE,
     RESET_TOKEN_INVALID_MESSAGE,
@@ -40,9 +46,12 @@ from .serializers import (
     RefreshTokenSerializer,
     ForgotPasswordSerializer,
     VerifyResetCodeSerializer,
-    ResetPasswordSerializer
+    ResetPasswordSerializer,
+    ChangePasswordSerializer,
 )
 from django.conf import settings
+from .device import device_info
+from .throttling import CHANGE_PASSWORD_ATTEMPTS, CHANGE_PASSWORD_WINDOW_SECONDS, ChangePasswordRateThrottle
 
 SEND_OTP_SUCCESS_MESSAGE = "OTP verification code transmitted successfully."
 VERIFY_OTP_SUCCESS_MESSAGE = "OTP validation verified successfully."
@@ -97,6 +106,19 @@ TokenRefreshResponse = inline_serializer(
 SignupResponse = inline_serializer(
     "SignupResponse", {"message": serializers.CharField(), "email": serializers.EmailField()}
 )
+PasswordChangedResponse = inline_serializer(
+    "PasswordChangedResponse",
+    {
+        "message": serializers.CharField(help_text="Confirmation text to show the user."),
+        "access": serializers.CharField(
+            help_text="New JWT access token for this device, valid for 30 minutes. Replace the stored one."
+        ),
+        "refresh": serializers.CharField(
+            help_text="New JWT refresh token for this device, valid for 1 day. Replace the stored one; "
+            "the old refresh token no longer works."
+        ),
+    },
+)
 ResetCodeVerifiedResponse = inline_serializer(
     "ResetCodeVerifiedResponse",
     {
@@ -150,7 +172,7 @@ class AuthViewSet(viewsets.ViewSet):
     """Account endpoints. Only logout needs a logged-in user; the rest are public."""
 
     serializer_class = SendOTPSerializer
-    AUTHENTICATED_ACTIONS = {"logout"}
+    AUTHENTICATED_ACTIONS = {"logout", "change_password"}
 
     def initialize_request(self, request, *args, **kwargs):
         # DRF picks authenticators before it sets self.action, so work out the action first.
@@ -169,6 +191,18 @@ class AuthViewSet(viewsets.ViewSet):
         if getattr(self, "action", None) in self.AUTHENTICATED_ACTIONS:
             return [IsAuthenticated()]
         return super().get_permissions()
+
+    def get_throttles(self):
+        # Only change-password is limited for now; the other auth endpoints come in feature 11.
+        if getattr(self, "action", None) == "change_password":
+            return [ChangePasswordRateThrottle()]
+        return super().get_throttles()
+
+    def throttled(self, request, wait):
+        # Same body shape as send-otp's 429; DRF still adds the Retry-After header from `wait`.
+        exc = Throttled(wait)
+        exc.detail = {"error": TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE, "retry_after": math.ceil(wait or 0)}
+        raise exc
 
     @extend_schema(
         tags=["Auth"],
@@ -693,6 +727,8 @@ class AuthViewSet(viewsets.ViewSet):
             "- The password is changed and the reset token stops working.\n"
             "- Every refresh token the user had is blacklisted, so all existing sessions end. Access "
             "tokens already issued keep working until they expire (at most 30 minutes).\n"
+            "- A *Your AxiomVault password was changed* email is sent to the account with the time, "
+            "device, and IP address, so the owner notices a reset they did not make.\n"
             "- Send the user to *Sign In* to log in with the new password.\n\n"
             "**Responses**\n"
             "- `200`: password changed; go to *Sign In*.\n"
@@ -746,7 +782,9 @@ class AuthViewSet(viewsets.ViewSet):
         serializer.is_valid(raise_exception=True)
 
         AuthService.reset_password(
-            serializer.validated_data["reset_token"], serializer.validated_data["new_password"]
+            serializer.validated_data["reset_token"],
+            serializer.validated_data["new_password"],
+            device_info(request),
         )
         return Response({"message": PASSWORD_RESET_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
 
@@ -836,3 +874,106 @@ class AuthViewSet(viewsets.ViewSet):
 
         AuthService.logout(request.user, serializer.validated_data["refresh"])
         return Response({"message": LOGOUT_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=["Auth"],
+        summary="Change password (logged in)",
+        description=(
+            "**Change Password screen** (account settings). A logged-in user sets a new password by "
+            "giving their current one.\n\n"
+            "**Authentication:** required. Send `Authorization: Bearer <access>`.\n\n"
+            "**Request fields**\n"
+            "- `current_password` (required): the password the user logs in with today.\n"
+            "- `new_password` (required): at least 8 characters, not a common password, not only "
+            "numbers, and not too similar to the email or name.\n"
+            "- `re_enter_password` (required): must match `new_password`.\n\n"
+            "**What happens on success**\n"
+            "- The password is changed and **every session on every device is logged out** (all refresh "
+            "tokens are blacklisted).\n"
+            "- This device gets a **new `access` and `refresh`** in the response. Replace both stored "
+            "tokens; the old refresh token no longer works.\n"
+            "- A *Your AxiomVault password was changed* email is sent to the account with the time, "
+            "device, and IP address. If the email cannot be sent, the change still succeeds.\n\n"
+            "**Guess limit**\n"
+            f"- At most **{CHANGE_PASSWORD_ATTEMPTS} attempts per user every "
+            f"{CHANGE_PASSWORD_WINDOW_SECONDS // 60} minutes**, right or wrong. After that the answer is "
+            "`429` with `retry_after` (seconds) and a `Retry-After` header; show a countdown.\n\n"
+            "**Responses**\n"
+            "- `200`: store the new tokens and show a success message.\n"
+            "- `400`: show the errors under the matching field (`current_password` when it is wrong, "
+            "`new_password` with every rule that failed, `re_enter_password` when they differ). This is "
+            "`400`, not `401`, so do not log the user out.\n"
+            "- `401`: the access token is missing, expired, or invalid. Refresh it and retry.\n"
+            "- `429`: too many attempts; wait `retry_after` seconds."
+        ),
+        request=ChangePasswordSerializer,
+        examples=[
+            OpenApiExample(
+                "Change password",
+                value={
+                    "current_password": "Bright-Ledger-2026!",
+                    "new_password": "Quiet-Harbor-2026!",
+                    "re_enter_password": "Quiet-Harbor-2026!",
+                },
+                request_only=True,
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=PasswordChangedResponse,
+                description="Password changed; other sessions ended; new tokens for this device.",
+                examples=[
+                    OpenApiExample(
+                        "Password changed",
+                        value={
+                            "message": PASSWORD_CHANGED_MESSAGE,
+                            "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...access",
+                            "refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...refresh",
+                        },
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Wrong current password, refused new password, or a field problem.",
+                examples=[
+                    OpenApiExample(
+                        "Wrong current password", value={"current_password": [CURRENT_PASSWORD_INCORRECT_MESSAGE]}
+                    ),
+                    OpenApiExample(
+                        "Weak new password",
+                        value={"new_password": ["This password is too common.", "This password is entirely numeric."]},
+                    ),
+                    OpenApiExample("Passwords differ", value={"re_enter_password": ["Passwords do not match."]}),
+                    OpenApiExample("Missing field", value={"current_password": ["This field is required."]}),
+                ],
+            ),
+            401: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="No access token, or the access token is expired or invalid.",
+                examples=[
+                    OpenApiExample("No access token", value={"detail": "Authentication credentials were not provided."}),
+                ],
+            ),
+            429: OpenApiResponse(
+                response=RetryErrorResponse,
+                description="Too many attempts; wait `retry_after` seconds.",
+                examples=[
+                    OpenApiExample(
+                        "Too many attempts", value={"error": TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE, "retry_after": 812}
+                    )
+                ],
+            ),
+        },
+    )
+    def change_password(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = AuthService.change_password(
+            request.user,
+            serializer.validated_data["current_password"],
+            serializer.validated_data["new_password"],
+            device_info(request),
+        )
+        return Response(result, status=status.HTTP_200_OK)

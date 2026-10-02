@@ -62,6 +62,26 @@ class LogoutSerializer(serializers.Serializer):
         help_text="The `refresh` token returned by login. It is blacklisted and can never be used again.",
     )
 
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(
+        write_only=True, required=True, help_text="The password the user logs in with today."
+    )
+    # Strength is checked in AuthService.change_password, where the user (email, name) is known.
+    new_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        help_text="The new password. At least 8 characters, not too common, not only numbers, "
+        "and not too similar to the email or name.",
+    )
+    re_enter_password = serializers.CharField(
+        write_only=True, required=True, help_text="The new password again. Must match `new_password`."
+    )
+
+    def validate(self, data):
+        if data["new_password"] != data["re_enter_password"]:
+            raise serializers.ValidationError({"re_enter_password": "Passwords do not match."})
+        return data
+
 class ForgotPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(
         required=True,

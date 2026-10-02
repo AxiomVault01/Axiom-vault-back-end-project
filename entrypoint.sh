@@ -44,8 +44,9 @@ python manage.py migrate --noinput
 # ==========================================================
 # 4. RUN ASSET MANAGEMENT ONLY IN LOCAL ENVIRONMENTS
 # ==========================================================
-# We already set Render to process collectstatic during the Build Phase, 
-# so we skip this time-consuming task on container boot.
+# Production images already run collectstatic in the Dockerfile, so we skip it on
+# boot. Locally the project folder is mounted over /app, hiding those files, so we
+# collect them here.
 if [ "$ENV" != "prod" ]; then
   echo "📁 Collecting development static files..."
   python manage.py collectstatic --noinput

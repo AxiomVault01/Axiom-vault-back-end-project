@@ -1,11 +1,16 @@
+import os
+import subprocess
+import sys
 import time
 from datetime import timedelta
 from smtplib import SMTPRecipientsRefused
 from unittest.mock import patch
 
 import pytest
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.cache import cache
 from django.utils import timezone
 from kombu.exceptions import OperationalError
 from rest_framework.exceptions import ValidationError
@@ -21,7 +26,10 @@ from accounts.services import (
     EMAIL_NOT_VERIFIED_MESSAGE,
     FORGOT_PASSWORD_MESSAGE,
     INVALID_CREDENTIALS_MESSAGE,
+    PASSWORD_CHANGED_MESSAGE,
     PASSWORD_RESET_SUCCESS_MESSAGE,
+    CURRENT_PASSWORD_INCORRECT_MESSAGE,
+    TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE,
     RESET_CODE_VERIFIED_MESSAGE,
     RESET_TOKEN_INVALID_MESSAGE,
     INCORRECT_CODE_MESSAGE,
@@ -43,8 +51,17 @@ from accounts.services import (
     OTPService,
     PasswordResetToken,
     SignupVerificationToken,
+    blacklist_all_refresh_tokens,
+    notify_password_changed,
 )
-from accounts.tasks import PASSWORD_RESET_EMAIL_SUBJECT, OTPEmailDeliveryError, send_otp_email_task
+from accounts.device import client_ip, describe_user_agent
+from accounts.tasks import (
+    PASSWORD_CHANGED_EMAIL_SUBJECT,
+    PASSWORD_RESET_EMAIL_SUBJECT,
+    OTPEmailDeliveryError,
+    send_otp_email_task,
+    send_password_changed_email_task,
+)
 
 User = get_user_model()
 
@@ -1404,3 +1421,322 @@ def test_signup_code_is_queued_with_the_original_two_arguments():
     signup_call, reset_call = delay.call_args_list
     assert signup_call.args == (NEW_EMAIL, signup_call.args[1]) and signup_call.kwargs == {}
     assert reset_call.kwargs == {"purpose": "password_reset"}
+
+
+# --- 5: change password ---
+
+
+@pytest.mark.django_db
+def test_reset_logs_out_every_device(api_client):
+    user = create_user("ada@example.com")
+    first_device = login_tokens(api_client)["refresh"]
+    second_device = login_tokens(api_client)["refresh"]
+
+    AuthService.reset_password(reset_token_for(user), NEW_PASSWORD)
+
+    for refresh in (first_device, second_device):
+        assert api_client.post(REFRESH_URL, {"refresh": refresh}, format="json").status_code == 401
+
+
+@pytest.mark.django_db
+def test_blacklisting_everything_twice_is_harmless():
+    user = create_user("ada@example.com")
+    RefreshToken.for_user(user)
+    already = RefreshToken.for_user(user)
+    already.blacklist()
+
+    blacklist_all_refresh_tokens(user)
+    blacklist_all_refresh_tokens(user)
+
+    assert BlacklistedToken.objects.filter(token__user=user).count() == 2
+
+
+CHROME_ON_WINDOWS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/129.0.0.0 Safari/537.36"
+)
+
+
+@pytest.mark.parametrize("user_agent, expected", [
+    (CHROME_ON_WINDOWS, "Chrome on Windows"),
+    ("", "Unknown device"),
+    ("garbage", "Unknown device"),
+    ("curl/8.4.0", "curl"),
+])
+def test_describe_user_agent(user_agent, expected):
+    assert describe_user_agent(user_agent) == expected
+
+
+def test_describe_user_agent_strips_control_characters_and_limits_length():
+    text = describe_user_agent("Evil\r\nInjected: header " + "A" * 500)
+
+    assert "\n" not in text and "\r" not in text
+    assert len(text) <= 100
+
+
+@pytest.mark.parametrize("meta, expected", [
+    ({"HTTP_X_FORWARDED_FOR": "1.2.3.4, 5.6.7.8", "REMOTE_ADDR": "10.0.0.1"}, "5.6.7.8"),
+    ({"REMOTE_ADDR": "10.0.0.1"}, "10.0.0.1"),
+    ({"HTTP_X_FORWARDED_FOR": "not-an-ip", "REMOTE_ADDR": "10.0.0.1"}, "Unknown"),
+    ({}, "Unknown"),
+    ({"REMOTE_ADDR": "2001:db8::1"}, "2001:db8::1"),
+])
+def test_client_ip(meta, expected):
+    assert client_ip(meta) == expected
+
+
+def test_password_changed_email_text():
+    send_password_changed_email_task.run(
+        "ada@example.com", "2 Oct 2026, 10:15 UTC", "changed from your account settings",
+        "Chrome on Windows", "5.6.7.8",
+    )
+
+    email = mail.outbox[0]
+    assert email.subject == PASSWORD_CHANGED_EMAIL_SUBJECT
+    for text in ("2 Oct 2026, 10:15 UTC", "changed from your account settings", "Chrome on Windows",
+                 "5.6.7.8", "If this wasn't you"):
+        assert text in email.body
+
+
+@pytest.mark.django_db
+def test_notification_queue_failure_does_not_raise_or_log_the_address(caplog, django_capture_on_commit_callbacks):
+    user = create_user("ada@example.com")
+
+    with patch("accounts.services.send_password_changed_email_task.delay", side_effect=OperationalError("down")):
+        with django_capture_on_commit_callbacks(execute=True):
+            notify_password_changed(user, "changed from your account settings", {"device": "X", "ip": "1.2.3.4"})
+
+    assert "could not be queued" in caplog.text
+    assert "ada@example.com" not in caplog.text
+    assert "1.2.3.4" not in caplog.text
+
+
+CHANGE_URL = "/api/v1/auth/change-password/"
+DEVICE = {"device": "Chrome on Windows", "ip": "5.6.7.8"}
+
+
+@pytest.mark.django_db
+def test_change_password_ends_sessions_returns_new_tokens_and_notifies(api_client, django_capture_on_commit_callbacks):
+    user = create_user("ada@example.com")
+    old_refresh = [login_tokens(api_client)["refresh"], login_tokens(api_client)["refresh"]]
+
+    with django_capture_on_commit_callbacks(execute=True):
+        result = AuthService.change_password(user, "Str0ng-Passw0rd!", NEW_PASSWORD, DEVICE)
+
+    assert set(result) == {"message", "access", "refresh"}
+    assert result["message"] == PASSWORD_CHANGED_MESSAGE
+    assert AccessToken(result["access"])["user_id"] == str(user.id)
+    user.refresh_from_db()
+    assert user.check_password(NEW_PASSWORD)
+    for refresh in old_refresh:
+        assert api_client.post(REFRESH_URL, {"refresh": refresh}, format="json").status_code == 401
+    assert api_client.post(REFRESH_URL, {"refresh": result["refresh"]}, format="json").status_code == 200
+    notice = [m for m in mail.outbox if m.subject == PASSWORD_CHANGED_EMAIL_SUBJECT]
+    assert len(notice) == 1
+    assert notice[0].to == ["ada@example.com"]
+    assert "changed from your account settings" in notice[0].body
+    assert "Chrome on Windows" in notice[0].body and "5.6.7.8" in notice[0].body
+
+
+@pytest.mark.django_db
+def test_change_password_with_wrong_current_password_changes_nothing(django_capture_on_commit_callbacks):
+    user = create_user("ada@example.com")
+    RefreshToken.for_user(user)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        with pytest.raises(ValidationError) as error:
+            AuthService.change_password(user, "wrong-password", NEW_PASSWORD, DEVICE)
+
+    assert error.value.detail == {"current_password": [CURRENT_PASSWORD_INCORRECT_MESSAGE]}
+    user.refresh_from_db()
+    assert user.check_password("Str0ng-Passw0rd!")
+    assert not BlacklistedToken.objects.exists()
+    assert mail.outbox == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("new_password", ["short", "password123", "Ada Obi 1"])
+def test_change_password_refuses_weak_new_passwords(new_password):
+    user = create_user("ada@example.com")
+
+    with pytest.raises(ValidationError) as error:
+        AuthService.change_password(user, "Str0ng-Passw0rd!", new_password, DEVICE)
+
+    assert "new_password" in error.value.detail
+    user.refresh_from_db()
+    assert user.check_password("Str0ng-Passw0rd!")
+
+
+@pytest.mark.django_db
+def test_reset_password_sends_the_notification(django_capture_on_commit_callbacks):
+    user = create_user("ada@example.com")
+    token = reset_token_for(user)
+    mail.outbox.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        AuthService.reset_password(token, NEW_PASSWORD, DEVICE)
+
+    assert len(mail.outbox) == 1
+    assert mail.outbox[0].subject == PASSWORD_CHANGED_EMAIL_SUBJECT
+    assert "reset with an emailed code" in mail.outbox[0].body
+
+
+@pytest.fixture(autouse=True)
+def clear_throttle_counts():
+    # Throttle counts live in the cache; start every test from zero.
+    cache.clear()
+    yield
+    cache.clear()
+
+
+def change_body(current="Str0ng-Passw0rd!", new=NEW_PASSWORD, again=None):
+    return {"current_password": current, "new_password": new, "re_enter_password": again or new}
+
+
+def logged_in(api_client, email="ada@example.com"):
+    tokens = login_tokens(api_client, email)
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+    return tokens
+
+
+@pytest.mark.django_db
+def test_change_password_endpoint_returns_new_tokens(api_client):
+    create_user("ada@example.com")
+    old = logged_in(api_client)
+
+    response = api_client.post(CHANGE_URL, change_body(), format="json", HTTP_USER_AGENT=CHROME_ON_WINDOWS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"message", "access", "refresh"}
+    api_client.credentials()
+    assert api_client.post(REFRESH_URL, {"refresh": old["refresh"]}, format="json").status_code == 401
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("body, expected", [
+    (change_body(current="wrong"), {"current_password": [CURRENT_PASSWORD_INCORRECT_MESSAGE]}),
+    (change_body(again="Different-2026!"), {"re_enter_password": ["Passwords do not match."]}),
+    ({"new_password": NEW_PASSWORD, "re_enter_password": NEW_PASSWORD}, {"current_password": ["This field is required."]}),
+])
+def test_change_password_endpoint_rejects_bad_input(api_client, body, expected):
+    create_user("ada@example.com")
+    logged_in(api_client)
+
+    response = api_client.post(CHANGE_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == expected
+
+
+@pytest.mark.django_db
+def test_change_password_endpoint_rejects_weak_password(api_client):
+    create_user("ada@example.com")
+    logged_in(api_client)
+
+    response = api_client.post(CHANGE_URL, change_body(new="12345678"), format="json")
+
+    assert response.status_code == 400
+    assert "new_password" in response.json()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("header", [None, "Bearer not-a-jwt"], ids=["no-header", "garbage-access"])
+def test_change_password_endpoint_requires_login(api_client, header):
+    create_user("ada@example.com")
+    if header:
+        api_client.credentials(HTTP_AUTHORIZATION=header)
+
+    response = api_client.post(CHANGE_URL, change_body(), format="json")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_change_password_allows_five_attempts_then_429(api_client):
+    create_user("ada@example.com")
+    logged_in(api_client)
+
+    statuses = [api_client.post(CHANGE_URL, change_body(current="wrong"), format="json").status_code for _ in range(5)]
+    blocked = api_client.post(CHANGE_URL, change_body(), format="json")
+
+    assert statuses == [400] * 5
+    assert blocked.status_code == 429
+    assert blocked.json()["error"] == TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE
+    assert 0 < blocked.json()["retry_after"] <= 15 * 60
+    assert int(blocked["Retry-After"]) > 0
+
+
+@pytest.mark.django_db
+def test_change_password_limit_is_per_user(api_client):
+    create_user("ada@example.com")
+    create_user("other@example.com")
+    logged_in(api_client)
+    for _ in range(5):
+        api_client.post(CHANGE_URL, change_body(current="wrong"), format="json")
+
+    logged_in(api_client, "other@example.com")
+    response = api_client.post(CHANGE_URL, change_body(current="wrong"), format="json")
+
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_other_auth_endpoints_are_not_throttled(api_client):
+    create_user("ada@example.com")
+
+    statuses = {
+        api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "wrong"}, format="json").status_code
+        for _ in range(8)
+    }
+
+    assert statuses == {401}
+
+
+# --- 5: deploy readiness ---
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, ["http://local"]),
+    ("", ["http://local"]),
+    ("https://app.example.com", ["https://app.example.com"]),
+    (" https://a.example.com , ,https://b.example.com ", ["https://a.example.com", "https://b.example.com"]),
+])
+def test_env_list_reads_comma_separated_origins(monkeypatch, value, expected):
+    from config.settings import env_list
+
+    if value is None:
+        monkeypatch.delenv("CORS_TEST_ORIGINS", raising=False)
+    else:
+        monkeypatch.setenv("CORS_TEST_ORIGINS", value)
+
+    assert env_list("CORS_TEST_ORIGINS", ["http://local"]) == expected
+
+
+def run_settings_import(env_overrides):
+    env = {**os.environ, **env_overrides}
+    return subprocess.run(
+        [sys.executable, "-c", "import config.settings"],
+        cwd=settings.BASE_DIR, env=env, capture_output=True, text=True,
+    )
+
+
+def test_production_refuses_to_start_without_a_secret_key():
+    # An empty value is present in the environment, so load_dotenv() does not fill it from .env.
+    result = run_settings_import({"ENV": "prod", "SECRET_KEY": ""})
+
+    assert result.returncode != 0
+    assert "SECRET_KEY must be set when ENV=prod" in result.stderr
+
+
+def test_production_starts_with_a_secret_key():
+    result = run_settings_import({"ENV": "prod", "SECRET_KEY": "a-real-production-key-0123456789abcdef"})
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_whitenoise_serves_static_files():
+    assert "whitenoise.middleware.WhiteNoiseMiddleware" in settings.MIDDLEWARE
+    assert settings.MIDDLEWARE.index("whitenoise.middleware.WhiteNoiseMiddleware") == (
+        settings.MIDDLEWARE.index("django.middleware.security.SecurityMiddleware") + 1
+    )

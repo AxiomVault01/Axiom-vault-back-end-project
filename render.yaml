@@ -1,82 +1,66 @@
-# Sample Render manifest for AxiomVault
-# Adjust names, plans, and secrets as needed in the Render dashboard
+# Render manifest for AxiomVault
+#
+# One Docker web service runs everything: entrypoint.sh applies migrations, starts
+# the Celery worker in the background, then starts Gunicorn. There is no separate
+# worker service.
+#
+# Values marked `sync: false` are secrets or per-deployment settings: Render asks
+# for them when the Blueprint is created, or set them on the service's
+# Environment page. Never put real values in this file.
 
 services:
   - type: web
     name: axiomvault-web
-    env: docker
+    runtime: docker
     plan: starter
     dockerfilePath: Dockerfile
-    buildCommand: ''
-    startCommand: ./entrypoint.sh
+    healthCheckPath: /api/docs/
     envVars:
       - key: ENV
         value: prod
       - key: DEBUG
         value: "False"
       - key: SECRET_KEY
-        fromSecret: SECRET_KEY
+        generateValue: true
+      # Neon Postgres: the direct (non-pooled) connection string, ending in ?sslmode=require.
       - key: DATABASE_URL
-        fromSecret: DATABASE_URL
+        sync: false
       - key: REDIS_URL
-        fromSecret: REDIS_URL
-      - key: EMAIL_HOST_USER
-        value: onukwupetrusoge@gmail.com
-      - key: EMAIL_HOST_PASSWORD
-        fromSecret: EMAIL_HOST_PASSWORD
-      - key: DEFAULT_FROM_EMAIL
-        value: onukwupetrusoge@gmail.com
-      - key: DJANGO_SUPERUSER_USERNAME
-        value: admin
-      - key: DJANGO_SUPERUSER_EMAIL
-        value: admin@example.com
-      - key: DJANGO_SUPERUSER_PASSWORD
-        fromSecret: DJANGO_SUPERUSER_PASSWORD
-
-  - type: worker
-    name: axiomvault-worker
-    env: docker
-    plan: starter
-    dockerfilePath: Dockerfile
-    startCommand: ./celery-entrypoint.sh celery -A config.celery worker -l info
-    envVars:
-      - key: ENV
-        value: prod
-      - key: DEBUG
+        fromService:
+          type: keyvalue
+          name: axiomvault-redis
+          property: connectionString
+      # Frontend origins allowed to call the API, comma-separated.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      # Brevo SMTP (or any SMTP provider).
+      - key: EMAIL_HOST
+        value: smtp-relay.brevo.com
+      - key: EMAIL_PORT
+        value: "587"
+      - key: EMAIL_USE_SSL
         value: "False"
-      - key: SECRET_KEY
-        fromSecret: SECRET_KEY
-      - key: DATABASE_URL
-        fromSecret: DATABASE_URL
-      - key: REDIS_URL
-        fromSecret: REDIS_URL
+      - key: EMAIL_USE_TLS
+        value: "True"
       - key: EMAIL_HOST_USER
-        value: onukwupetrusoge@gmail.com
+        sync: false
       - key: EMAIL_HOST_PASSWORD
-        fromSecret: EMAIL_HOST_PASSWORD
+        sync: false
       - key: DEFAULT_FROM_EMAIL
-        value: onukwupetrusoge@gmail.com
+        sync: false
+      # Django admin account created on first boot (used for /admin/ only).
       - key: DJANGO_SUPERUSER_USERNAME
-        value: admin
+        sync: false
       - key: DJANGO_SUPERUSER_EMAIL
-        value: admin@example.com
+        sync: false
       - key: DJANGO_SUPERUSER_PASSWORD
-        fromSecret: DJANGO_SUPERUSER_PASSWORD
+        sync: false
 
-databases:
-  - name: axiomvault-db
-    plan: starter
-    engine: postgres
-    version: "15"
-
-addons:
-  - type: redis
+  - type: keyvalue
     name: axiomvault-redis
     plan: starter
+    # Never evict: queued email jobs must not be dropped when memory is full.
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
 
-# Notes:
-# - After creating the managed Postgres and Redis instances on Render, set
-#   `DATABASE_URL` and `REDIS_URL` values in the Render dashboard or create
-#   secrets for them and reference them via `fromSecret`.
-# - Ensure secrets (SECRET_KEY, EMAIL_HOST_PASSWORD, DJANGO_SUPERUSER_PASSWORD)
-#   are created on Render and referenced in this manifest.
+# The database is hosted on Neon, not Render, so no `databases:` block.
