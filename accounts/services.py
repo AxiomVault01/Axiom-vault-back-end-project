@@ -13,6 +13,8 @@ from django.core.signing import BadSignature, TimestampSigner
 from kombu.exceptions import OperationalError
 from rest_framework import status
 from rest_framework.exceptions import APIException, ValidationError
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import OTP
 from .tasks import send_otp_email_task
@@ -36,6 +38,7 @@ TOKEN_INVALID_MESSAGE = "Your email verification has expired. Please verify your
 SIGNUP_SUCCESS_MESSAGE = "Account created successfully. You can now sign in."
 INVALID_CREDENTIALS_MESSAGE = "Invalid email or password."
 EMAIL_NOT_VERIFIED_MESSAGE = "Your email is not verified. Please sign up again to verify your email."
+SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again."
 
 
 class SignupVerificationToken:
@@ -93,6 +96,14 @@ class EmailNotVerified(APIException):
     def __init__(self):
         super().__init__()
         self.detail = {"error": EMAIL_NOT_VERIFIED_MESSAGE}
+
+
+class InvalidRefreshToken(APIException):
+    status_code = status.HTTP_401_UNAUTHORIZED
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": SESSION_EXPIRED_MESSAGE}
 
 
 def stored_email_for(typed_email: str) -> str:
@@ -274,6 +285,23 @@ class AuthService:
                 "role": user.role,
             },
         }
+
+    @staticmethod
+    def refresh_access_token(refresh: str) -> dict:
+        """Trades a valid refresh token for a new access token. The refresh token is not rotated."""
+        try:
+            # Rejects expired, tampered, malformed, and access (wrong type) tokens.
+            token = RefreshToken(refresh)
+        except TokenError:
+            raise InvalidRefreshToken()
+
+        user_id = token.payload.get(jwt_settings.USER_ID_CLAIM)
+        # filter().first() returns None for a deleted user instead of raising (simplejwt's own view 500s).
+        user = User.objects.filter(**{jwt_settings.USER_ID_FIELD: user_id}).first() if user_id else None
+        if user is None or not user.is_active:
+            raise InvalidRefreshToken()
+
+        return {"access": str(token.access_token)}
 
     @staticmethod
     def forgot_password(email: str) -> bool:

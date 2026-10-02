@@ -13,6 +13,7 @@ from .services import (
     INCORRECT_CODE_MESSAGE,
     MAX_CODE_ATTEMPTS,
     NO_ACTIVE_CODE_MESSAGE,
+    SESSION_EXPIRED_MESSAGE,
     SIGNUP_SUCCESS_MESSAGE,
     SIGNUP_TOKEN_MAX_AGE_SECONDS,
     TOKEN_INVALID_MESSAGE,
@@ -27,6 +28,7 @@ from .serializers import (
     ResendOTPSerializer,
     SignupSerializer,
     LoginSerializer,
+    RefreshTokenSerializer,
     ResetPasswordSerializer
 )
 
@@ -69,6 +71,15 @@ LoginResponse = inline_serializer(
             "access token and to log out."
         ),
         "user": LoginUserSchema,
+    },
+)
+TokenRefreshResponse = inline_serializer(
+    "TokenRefreshResponse",
+    {
+        "access": serializers.CharField(
+            help_text="New JWT access token, valid for 30 minutes. Replace the old one and send it as "
+            "`Authorization: Bearer <access>`."
+        ),
     },
 )
 SignupResponse = inline_serializer(
@@ -439,6 +450,71 @@ class AuthViewSet(viewsets.ViewSet):
             email=serializer.validated_data["email"],
             password=serializer.validated_data["password"],
         )
+        return Response(result, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=["Auth"],
+        summary="Get a new access token with the refresh token",
+        description=(
+            "**Keeps the user signed in.** The access token from login lasts only 30 minutes. When a "
+            "protected request answers `401`, the frontend calls this endpoint with the refresh token, "
+            "stores the new access token, and retries the original request. The user sees nothing.\n\n"
+            "**Request fields**\n"
+            "- `refresh` (required): the `refresh` token returned by `POST /api/v1/auth/login/`. It is "
+            "valid for **1 day** after login.\n\n"
+            "**What comes back**\n"
+            "- Only a new `access` token, valid for **30 minutes**. Send it on every protected request in "
+            "the header `Authorization: Bearer <access>`.\n"
+            "- There is **no new refresh token**. Keep using the one from login until it expires; after "
+            "that the user must log in again.\n\n"
+            "**Responses**\n"
+            "- `200`: success; replace the stored access token and retry the request that failed.\n"
+            "- `400`: `refresh` is missing or empty. This is a frontend bug, not an expired session.\n"
+            "- `401`: the refresh token is expired, invalid, an access token instead of a refresh token, "
+            "or belongs to an account that was deactivated or deleted. The message is the same in every "
+            "case. Clear both stored tokens and send the user to the Sign In screen.\n\n"
+            "**Authentication:** none. Do not send the expired access token; any `Authorization` header "
+            "is ignored."
+        ),
+        request=RefreshTokenSerializer,
+        examples=[
+            OpenApiExample(
+                "Refresh",
+                value={"refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...refresh"},
+                request_only=True,
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=TokenRefreshResponse,
+                description="New access token issued. Replace the stored one.",
+                examples=[
+                    OpenApiExample(
+                        "New access token",
+                        value={"access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...access"},
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="`refresh` is missing or empty.",
+                examples=[
+                    OpenApiExample("Missing refresh", value={"refresh": ["This field is required."]}),
+                    OpenApiExample("Empty refresh", value={"refresh": ["This field may not be blank."]}),
+                ],
+            ),
+            401: OpenApiResponse(
+                response=ErrorResponse,
+                description="Refresh token expired or not usable. Log in again.",
+                examples=[OpenApiExample("Session expired", value={"error": SESSION_EXPIRED_MESSAGE})],
+            ),
+        },
+    )
+    def token_refresh(self, request):
+        serializer = RefreshTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        result = AuthService.refresh_access_token(serializer.validated_data["refresh"])
         return Response(result, status=status.HTTP_200_OK)
 
     @extend_schema(request=SendOTPSerializer, tags=["Auth"])

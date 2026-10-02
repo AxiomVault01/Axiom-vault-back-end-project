@@ -20,6 +20,7 @@ from accounts.services import (
     INVALID_CREDENTIALS_MESSAGE,
     INCORRECT_CODE_MESSAGE,
     NO_ACTIVE_CODE_MESSAGE,
+    SESSION_EXPIRED_MESSAGE,
     SIGNUP_SUCCESS_MESSAGE,
     TOKEN_INVALID_MESSAGE,
     TOO_MANY_ATTEMPTS_MESSAGE,
@@ -27,6 +28,7 @@ from accounts.services import (
     CodeRequestTooSoon,
     AuthService,
     CodeVerificationFailed,
+    InvalidRefreshToken,
     OTPService,
     SignupVerificationToken,
 )
@@ -785,3 +787,121 @@ def test_access_token_authenticates_a_protected_request(api_client):
 
     assert anonymous.status_code == 400
     assert authenticated.status_code == 200
+
+
+# --- 3b: refresh token ---
+
+REFRESH_URL = "/api/v1/auth/token/refresh/"
+
+
+def expired_refresh_for(user):
+    token = RefreshToken.for_user(user)
+    token.set_exp(lifetime=-timedelta(seconds=1))
+    return str(token)
+
+
+def tampered(token):
+    # Keep the header and payload but swap in another token's signature, so the signature no longer matches.
+    header, payload, _ = token.split(".")
+    other_signature = str(RefreshToken.for_user(create_user("other@example.com"))).split(".")[2]
+    return f"{header}.{payload}.{other_signature}"
+
+
+@pytest.mark.django_db
+def test_refresh_returns_access_token_for_the_same_user():
+    user = create_user()
+    refresh = str(RefreshToken.for_user(user))
+
+    result = AuthService.refresh_access_token(refresh)
+
+    assert set(result) == {"access"}
+    access = AccessToken(result["access"])
+    assert access["user_id"] == str(user.id)
+    assert access["token_type"] == "access"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("make_token", [
+    expired_refresh_for,
+    lambda user: "not-a-jwt",
+    lambda user: tampered(str(RefreshToken.for_user(user))),
+    lambda user: str(RefreshToken.for_user(user).access_token),
+], ids=["expired", "garbage", "bad-signature", "access-token"])
+def test_refresh_rejects_bad_tokens(make_token):
+    user = create_user()
+
+    with pytest.raises(InvalidRefreshToken) as error:
+        AuthService.refresh_access_token(make_token(user))
+
+    assert error.value.detail == {"error": SESSION_EXPIRED_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_refresh_rejects_deactivated_user():
+    user = create_user()
+    refresh = str(RefreshToken.for_user(user))
+    user.is_active = False
+    user.save()
+
+    with pytest.raises(InvalidRefreshToken):
+        AuthService.refresh_access_token(refresh)
+
+
+@pytest.mark.django_db
+def test_refresh_rejects_deleted_user():
+    user = create_user()
+    refresh = str(RefreshToken.for_user(user))
+    user.delete()
+
+    with pytest.raises(InvalidRefreshToken):
+        AuthService.refresh_access_token(refresh)
+
+
+@pytest.mark.django_db
+def test_refresh_endpoint_returns_access_token_that_authenticates(api_client):
+    create_user("ada@example.com")
+    refresh = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json").json()["refresh"]
+
+    response = api_client.post(REFRESH_URL, {"refresh": refresh}, format="json")
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"access"}
+    api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.json()['access']}")
+    assert api_client.post(LOGOUT_URL, format="json").status_code == 200
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("body, message", [
+    ({}, "This field is required."),
+    ({"refresh": ""}, "This field may not be blank."),
+])
+def test_refresh_endpoint_rejects_missing_or_empty_field(api_client, body, message):
+    response = api_client.post(REFRESH_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"refresh": [message]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("make_token", [
+    expired_refresh_for,
+    lambda user: "not-a-jwt",
+    lambda user: str(RefreshToken.for_user(user).access_token),
+], ids=["expired", "garbage", "access-token"])
+def test_refresh_endpoint_returns_401_for_unusable_tokens(api_client, make_token):
+    user = create_user()
+
+    response = api_client.post(REFRESH_URL, {"refresh": make_token(user)}, format="json")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": SESSION_EXPIRED_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_refresh_endpoint_ignores_a_stale_authorization_header(api_client):
+    user = create_user()
+    api_client.credentials(HTTP_AUTHORIZATION="Bearer expired-or-garbage")
+
+    response = api_client.post(REFRESH_URL, {"refresh": str(RefreshToken.for_user(user))}, format="json")
+
+    assert response.status_code == 200

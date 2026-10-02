@@ -51,6 +51,12 @@ class LoginSerializer(serializers.Serializer):
         write_only=True, required=True, help_text="The account's password."
     )
 
+class RefreshTokenSerializer(serializers.Serializer):
+    refresh = serializers.CharField(
+        required=True,
+        help_text="The `refresh` token returned by login. Valid for 1 day after login.",
+    )
+
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
     otp_code = serializers.CharField(max_length=6, required=True)
