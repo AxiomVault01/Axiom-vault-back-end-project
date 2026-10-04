@@ -311,6 +311,9 @@ EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "True").strip().lower() in ("true", "1")
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").strip().lower() in ("true", "1")
+# Seconds before an SMTP connection or send gives up. Without it a blocked port (for
+# example on Render's free plan) can hang the single Celery worker forever.
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 
 
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")

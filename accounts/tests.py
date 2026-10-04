@@ -1740,3 +1740,25 @@ def test_whitenoise_serves_static_files():
     assert settings.MIDDLEWARE.index("whitenoise.middleware.WhiteNoiseMiddleware") == (
         settings.MIDDLEWARE.index("django.middleware.security.SecurityMiddleware") + 1
     )
+
+
+# --- fix: SMTP timeout ---
+
+
+def test_smtp_connection_gives_up_after_10_seconds():
+    from django.core.mail.backends.smtp import EmailBackend
+
+    assert settings.EMAIL_TIMEOUT == 10
+    assert EmailBackend().timeout == 10
+
+
+def test_smtp_timeout_is_reported_without_the_address(caplog):
+    address = "victim@example.com"
+
+    with patch("accounts.tasks.send_mail", side_effect=TimeoutError("timed out")):
+        with pytest.raises(OTPEmailDeliveryError):
+            send_otp_email_task.run(address, "123456")
+
+    assert "TimeoutError" in caplog.text
+    assert address not in caplog.text
+    assert "123456" not in caplog.text
