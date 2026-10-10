@@ -1,13 +1,33 @@
 import uuid
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.db.models.functions import Lower
+
+
+class Organisation(models.Model):
+    """A customer Cooperative. Names are unique, ignoring letter case."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(Lower("name"), name="unique_organisation_name_ci"),
+        ]
+
+    def __str__(self):
+        return self.name
 
 
 class User(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     full_name = models.CharField(max_length=255)
-    organization = models.CharField(max_length=255)
+    # Empty only for Django staff/superusers, who belong to no Cooperative.
+    organisation = models.ForeignKey(
+        Organisation, on_delete=models.PROTECT, null=True, blank=True, related_name="users"
+    )
     department = models.CharField(max_length=255)
 
     email = models.EmailField(unique=True)

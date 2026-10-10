@@ -9,6 +9,7 @@ from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
 from rest_framework import serializers
 from .services import (
     ACCOUNT_EXISTS_MESSAGE,
+    ORGANISATION_TAKEN_MESSAGE,
     CODE_EXPIRED_MESSAGE,
     CODE_TOO_SOON_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
@@ -69,7 +70,10 @@ LoginUserSchema = inline_serializer(
         "id": serializers.UUIDField(help_text="The user's permanent ID."),
         "email": serializers.EmailField(help_text="Login email, stored in lowercase for new accounts."),
         "full_name": serializers.CharField(help_text="Name shown in the app."),
-        "organization": serializers.CharField(help_text="Organization entered at registration."),
+        "organization": serializers.CharField(
+            help_text="Name of the user's organisation (Cooperative). An empty string for staff "
+            "accounts that belong to no organisation."
+        ),
         "department": serializers.CharField(
             help_text="Department value, e.g. `internal_audit`, `finance`, `compliance`, "
             "`risk_management`, `human_resources`, `others`."
@@ -349,7 +353,9 @@ class AuthViewSet(viewsets.ViewSet):
             f"- `verification_token` (required): from the `verify-otp` response; valid for "
             f"{SIGNUP_TOKEN_MAX_AGE_SECONDS // 60} minutes after verification.\n"
             "- `full_name` (required, max 255 characters).\n"
-            "- `organization` (required, max 255 characters).\n"
+            "- `organization` (required, max 255 characters): the name of the Cooperative this "
+            "person represents. Surrounding spaces are removed. Names are **unique, ignoring letter "
+            "case**: `Ikeja Cooperative` and `ikeja cooperative` are the same name.\n"
             "- `department` (required): one of `internal_audit`, `finance`, `compliance`, "
             "`risk_management`, `human_resources`, `others` (the dropdown values).\n"
             "- `password` (required): at least 8 characters, not a common password, not only "
@@ -357,14 +363,21 @@ class AuthViewSet(viewsets.ViewSet):
             "- `re_enter_password` (required): must equal `password`.\n\n"
             "The *Terms of Service* checkbox is enforced by the frontend only and is not sent.\n\n"
             "**What gets created**\n"
-            "- A verified account with **no role**; an admin assigns the role later in `/admin/`.\n"
+            "- A new **organisation** named from `organization`, and a verified account in it with "
+            "**no role**; an admin assigns the role later in `/admin/`. A name that is already "
+            "registered is refused, never joined, so nobody can enter someone else's organisation "
+            "by typing its name.\n"
             "- If the email belongs to an account left **unverified** by the old signup flow, that "
             "account is updated in place instead (new details and password, verified, role "
-            "cleared).\n\n"
+            "cleared), and its existing organisation is renamed. Keeping its own current name is "
+            "allowed.\n\n"
             "**Responses**\n"
             "- `201`: account created; send the user to *Sign In*.\n"
             "- `400`: a field error, passwords that differ, a weak password, an invalid or expired "
-            "token (verify the email again), or a verified account already uses the email.\n\n"
+            "token (verify the email again), a verified account already uses the email, or the "
+            "organisation name is taken. For the taken name, show the message under the "
+            "organisation field; the same `verification_token` still works, so the user only needs "
+            "to change the name and submit again. Nothing is saved on any `400`.\n\n"
             "**Authentication:** none. Any `Authorization` header is ignored."
         ),
         request=SignupSerializer,
@@ -395,7 +408,10 @@ class AuthViewSet(viewsets.ViewSet):
             ),
             400: OpenApiResponse(
                 response=OpenApiTypes.OBJECT,
-                description="Invalid form fields, weak password, bad or expired token, or the email already has an account.",
+                description=(
+                    "Invalid form fields, weak password, bad or expired token, the email already has "
+                    "an account, or the organisation name is taken."
+                ),
                 examples=[
                     OpenApiExample("Missing field", value={"full_name": ["This field is required."]}),
                     OpenApiExample("Unknown department", value={"department": ['"hr" is not a valid choice.']}),
@@ -406,6 +422,10 @@ class AuthViewSet(viewsets.ViewSet):
                     ),
                     OpenApiExample("Token invalid or expired", value={"error": TOKEN_INVALID_MESSAGE}),
                     OpenApiExample("Account exists", value={"error": ACCOUNT_EXISTS_MESSAGE}),
+                    OpenApiExample(
+                        "Organisation name taken",
+                        value={"organization": [ORGANISATION_TAKEN_MESSAGE]},
+                    ),
                 ],
             ),
         },

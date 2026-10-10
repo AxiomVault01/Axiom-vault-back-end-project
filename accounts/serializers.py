@@ -30,7 +30,13 @@ DEPARTMENT_CHOICES = [
 class SignupSerializer(serializers.Serializer):
     verification_token = serializers.CharField(required=True)
     full_name = serializers.CharField(max_length=255, required=True)
-    organization = serializers.CharField(max_length=255, required=True)
+    organization = serializers.CharField(
+        max_length=255,
+        required=True,
+        help_text="Name of the Cooperative this person represents, at most 255 characters. Signup "
+        "creates a new organisation with this name. Names are unique, ignoring letter case and "
+        "surrounding spaces, so a name that is already registered is refused.",
+    )
     department = serializers.ChoiceField(choices=DEPARTMENT_CHOICES, required=True)
 
     # Strength is checked in AuthService.signup, where the email and name are known.
