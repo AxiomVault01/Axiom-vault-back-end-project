@@ -11,6 +11,9 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
+from django.db import IntegrityError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
+from django.db.models.query import QuerySet
 from django.utils import timezone
 from kombu.exceptions import OperationalError
 from rest_framework.exceptions import ValidationError
@@ -18,9 +21,10 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
-from accounts.models import OTP
+from accounts.models import OTP, Organisation
 from accounts.services import (
     ACCOUNT_EXISTS_MESSAGE,
+    ORGANISATION_TAKEN_MESSAGE,
     CODE_EXPIRED_MESSAGE,
     DELIVERY_FAILED_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
@@ -68,13 +72,14 @@ User = get_user_model()
 NEW_EMAIL = "auditor@agency.gov"
 
 
-def create_user(email="ada@example.com", is_verified=True, **extra):
+def create_user(email="ada@example.com", is_verified=True, organisation_name="Axiom", **extra):
+    organisation, _ = Organisation.objects.get_or_create(name=organisation_name)
     return User.objects.create_user(
         username=email.split("@")[0],
         email=email,
         password="Str0ng-Passw0rd!",
         full_name="Ada Obi",
-        organization="Axiom",
+        organisation=organisation,
         department="operations",
         role="fraud_analyst",
         is_verified=is_verified,
@@ -90,7 +95,7 @@ def age_codes(email, seconds):
 def test_new_user_is_unverified_and_password_is_hashed():
     user = User.objects.create_user(
         username="ada", email="ada@example.com", password="Str0ng-Passw0rd!",
-        full_name="Ada Obi", organization="Axiom", department="operations", role="fraud_analyst",
+        full_name="Ada Obi", department="operations", role="fraud_analyst",
     )
 
     assert user.is_verified is False
@@ -535,8 +540,8 @@ def test_signup_creates_verified_lowercase_user_without_role():
 
 @pytest.mark.django_db
 def test_signup_allows_emails_sharing_the_part_before_the_at():
-    AuthService.signup(signup_data("john@company-a.com"))
-    AuthService.signup(signup_data("john@company-b.com"))
+    AuthService.signup(signup_data("john@company-a.com", organization="Company A"))
+    AuthService.signup(signup_data("john@company-b.com", organization="Company B"))
 
     assert User.objects.filter(email__startswith="john@").count() == 2
 
@@ -1762,3 +1767,171 @@ def test_smtp_timeout_is_reported_without_the_address(caplog):
     assert "TimeoutError" in caplog.text
     assert address not in caplog.text
     assert "123456" not in caplog.text
+
+
+# ---- 13: Organisations table ----
+
+ORGANISATION_TAKEN = {"organization": [ORGANISATION_TAKEN_MESSAGE]}
+
+
+@pytest.mark.django_db
+def test_signup_creates_one_organisation_for_the_new_user():
+    user = AuthService.signup(signup_data(organization="  Ikeja Cooperative  "))
+
+    organisation = Organisation.objects.get()
+    assert organisation.name == "Ikeja Cooperative"
+    assert user.organisation == organisation
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("taken_name", ["Ikeja Cooperative", "IKEJA cooperative", "  ikeja cooperative "])
+def test_signup_endpoint_refuses_a_taken_organisation_name(api_client, taken_name):
+    Organisation.objects.create(name="Ikeja Cooperative")
+    data = signup_data(organization=taken_name)
+
+    refused = api_client.post(SIGNUP_URL, data, format="json")
+
+    assert refused.status_code == 400
+    assert refused.json() == ORGANISATION_TAKEN
+    assert User.objects.count() == 0
+    assert Organisation.objects.count() == 1
+
+    # The same verification token still works with a free name.
+    data["organization"] = "Lekki Cooperative"
+    created = api_client.post(SIGNUP_URL, data, format="json")
+    assert created.status_code == 201
+    assert User.objects.get().organisation.name == "Lekki Cooperative"
+
+
+@pytest.mark.django_db
+def test_legacy_signup_renames_its_own_organisation_and_may_keep_the_name():
+    legacy = create_user("legacy.user@example.com", is_verified=False, organisation_name="Old Name")
+    organisation_id = legacy.organisation_id
+
+    user = AuthService.signup(signup_data("legacy.user@example.com", organization="old name"))
+
+    assert user.organisation_id == organisation_id
+    assert Organisation.objects.get().name == "old name"
+
+
+@pytest.mark.django_db
+def test_legacy_signup_cannot_take_another_organisations_name():
+    create_user("ada@example.com", organisation_name="Ikeja Cooperative")
+    legacy = create_user("legacy.user@example.com", is_verified=False, organisation_name="Old Name")
+
+    with pytest.raises(ValidationError) as excinfo:
+        AuthService.signup(signup_data("legacy.user@example.com", organization="ikeja cooperative"))
+
+    assert excinfo.value.detail == ORGANISATION_TAKEN
+    legacy.refresh_from_db()
+    assert legacy.organisation.name == "Old Name"
+    assert legacy.is_verified is False
+
+
+@pytest.mark.django_db
+def test_legacy_signup_without_an_organisation_gets_a_new_one():
+    legacy = create_user("legacy.user@example.com", is_verified=False)
+    User.objects.filter(pk=legacy.pk).update(organisation=None)
+
+    user = AuthService.signup(signup_data("legacy.user@example.com", organization="Fresh Cooperative"))
+
+    assert user.organisation.name == "Fresh Cooperative"
+
+
+@pytest.mark.django_db
+def test_failed_signup_creates_no_organisation():
+    with pytest.raises(ValidationError):
+        AuthService.signup(signup_data(password="short", re_enter_password="short"))
+
+    duplicate_email = IntegrityError('duplicate key value violates unique constraint "accounts_user_email_key"')
+    with patch.object(User.objects, "create_user", side_effect=duplicate_email):
+        with pytest.raises(ValidationError) as excinfo:
+            AuthService.signup(signup_data())
+
+    assert excinfo.value.detail == {"error": ACCOUNT_EXISTS_MESSAGE}
+    assert Organisation.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_racing_signups_for_one_name_get_the_organisation_error():
+    Organisation.objects.create(name="Ikeja Cooperative")
+
+    # The name check misses the other signup's row, so the database constraint has to stop it.
+    with patch.object(QuerySet, "exists", return_value=False):
+        with pytest.raises(ValidationError) as excinfo:
+            AuthService.signup(signup_data(organization="ikeja COOPERATIVE"))
+
+    assert excinfo.value.detail == ORGANISATION_TAKEN
+    assert User.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_organisation_names_are_unique_ignoring_letter_case():
+    Organisation.objects.create(name="Ikeja Cooperative")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Organisation.objects.create(name="IKEJA COOPERATIVE")
+
+
+@pytest.mark.django_db
+def test_login_shows_an_empty_organisation_for_staff_without_one():
+    user = create_user("staff@example.com")
+    User.objects.filter(pk=user.pk).update(organisation=None)
+
+    result = AuthService.login(None, "staff@example.com", "Str0ng-Passw0rd!")
+
+    assert result["user"]["organization"] == ""
+
+
+BEFORE_ORGANISATIONS = [("accounts", "0003_alter_user_role")]
+WITH_ORGANISATIONS = [("accounts", "0006_remove_user_organization_and_more")]
+
+
+def migrate_to(target):
+    executor = MigrationExecutor(connection)
+    executor.migrate(target)
+    return executor.loader.project_state(target).apps
+
+
+@pytest.mark.django_db(transaction=True)
+def test_organisation_migrations_move_the_text_both_ways():
+    try:
+        old_apps = migrate_to(BEFORE_ORGANISATIONS)
+        OldUser = old_apps.get_model("accounts", "User")
+        start = timezone.now()
+        texts = {"first@example.com": "Ikeja Coop", "second@example.com": " ikeja coop ", "staff@example.com": ""}
+        for offset, (email, text) in enumerate(texts.items()):
+            OldUser.objects.create(
+                username=email, email=email, organization=text, date_joined=start + timedelta(seconds=offset)
+            )
+
+        new_apps = migrate_to(WITH_ORGANISATIONS)
+        NewUser = new_apps.get_model("accounts", "User")
+        moved = {u.email: u.organisation.name if u.organisation else None for u in NewUser.objects.all()}
+        assert moved == {
+            "first@example.com": "Ikeja Coop",
+            "second@example.com": "ikeja coop (2)",
+            "staff@example.com": None,
+        }
+        with pytest.raises(IntegrityError), transaction.atomic():
+            new_apps.get_model("accounts", "Organisation").objects.create(name="IKEJA COOP")
+
+        old_apps = migrate_to(BEFORE_ORGANISATIONS)
+        restored = dict(old_apps.get_model("accounts", "User").objects.values_list("email", "organization"))
+        assert restored == {
+            "first@example.com": "Ikeja Coop",
+            "second@example.com": "ikeja coop (2)",
+            "staff@example.com": "",
+        }
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+@pytest.mark.django_db
+def test_createsuperuser_works_without_an_organisation():
+    from django.core.management import call_command
+
+    call_command("createsuperuser", interactive=False, username="admin", email="admin@example.com", verbosity=0)
+
+    assert User.objects.get(username="admin").organisation is None

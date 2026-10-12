@@ -21,7 +21,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
-from .models import OTP, User
+from .models import OTP, Organisation, User
 from .tasks import send_otp_email_task, send_password_changed_email_task
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 VERIFICATION_CODE_COOLDOWN_SECONDS = 60
 ACCOUNT_EXISTS_MESSAGE = "An account with this email already exists. Please sign in."
+ORGANISATION_TAKEN_MESSAGE = "An organisation with this name already exists."
+ORGANISATION_NAME_CONSTRAINT = "unique_organisation_name_ci"
 CODE_TOO_SOON_MESSAGE = "Please wait before requesting a new code."
 DELIVERY_FAILED_MESSAGE = "We could not send the verification code. Please try again shortly."
 
@@ -322,9 +324,9 @@ class AuthService:
         except DjangoValidationError as exc:
             raise ValidationError({"password": list(exc.messages)})
 
+        organisation_name = validated_data["organization"].strip()
         profile = {
             "full_name": validated_data["full_name"],
-            "organization": validated_data["organization"],
             "department": validated_data["department"],
             "role": "",
             "is_verified": True,
@@ -334,19 +336,41 @@ class AuthService:
                 legacy = list(User.objects.select_for_update().filter(email__iexact=email))
                 if len(legacy) > 1 or any(user.is_verified for user in legacy):
                     raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
-                if legacy:
-                    user = legacy[0]
+                user = legacy[0] if legacy else None
+                organisation = user.organisation if user else None
+
+                # A taken name is refused, never joined; the account's own current name is fine.
+                taken = Organisation.objects.filter(name__iexact=organisation_name)
+                if organisation:
+                    taken = taken.exclude(pk=organisation.pk)
+                if taken.exists():
+                    raise ValidationError({"organization": [ORGANISATION_TAKEN_MESSAGE]})
+
+                if organisation:
+                    organisation.name = organisation_name
+                    organisation.save(update_fields=["name"])
+                else:
+                    organisation = Organisation.objects.create(name=organisation_name)
+
+                if user:
                     user.email = email
+                    user.organisation = organisation
                     for field, value in profile.items():
                         setattr(user, field, value)
                     user.set_password(password)
                     user.save()
                     return user
                 return User.objects.create_user(
-                    username=uuid.uuid4().hex, email=email, password=password, **profile
+                    username=uuid.uuid4().hex,
+                    email=email,
+                    password=password,
+                    organisation=organisation,
+                    **profile,
                 )
-        except IntegrityError:
-            # Two signups for the same email at once: the unique email constraint stops the second.
+        except IntegrityError as exc:
+            # Two signups at once: a unique constraint stops the second, on the name or the email.
+            if ORGANISATION_NAME_CONSTRAINT in str(exc):
+                raise ValidationError({"organization": [ORGANISATION_TAKEN_MESSAGE]})
             raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
     @staticmethod
@@ -369,7 +393,7 @@ class AuthService:
                 "id": str(user.id),
                 "email": user.email,
                 "full_name": user.full_name,
-                "organization": user.organization,
+                "organization": user.organisation.name if user.organisation else "",
                 "department": user.department,
                 "role": user.role,
             },
