@@ -42,8 +42,26 @@ class User(AbstractUser):
 
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
 
+    SUPER_ADMIN = "super_admin"
+    TEAM_MEMBER = "team_member"
+    ACCOUNT_TYPE_CHOICES = [
+        (SUPER_ADMIN, "Super Admin"),
+        (TEAM_MEMBER, "Team Member"),
+    ]
+    # Empty only for Django staff/superusers, who belong to no Cooperative.
+    account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPE_CHOICES, blank=True, default="")
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["username"]
+
+    class Meta(AbstractUser.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organisation"],
+                condition=models.Q(account_type="super_admin"),
+                name="one_super_admin_per_organisation",
+            ),
+        ]
 
     def __str__(self):
         return self.email

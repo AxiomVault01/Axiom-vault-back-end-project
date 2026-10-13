@@ -25,6 +25,7 @@ from accounts.models import OTP, Organisation
 from accounts.services import (
     ACCOUNT_EXISTS_MESSAGE,
     ORGANISATION_TAKEN_MESSAGE,
+    WRONG_SIGN_IN_ROLE_MESSAGE,
     CODE_EXPIRED_MESSAGE,
     DELIVERY_FAILED_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
@@ -72,8 +73,10 @@ User = get_user_model()
 NEW_EMAIL = "auditor@agency.gov"
 
 
-def create_user(email="ada@example.com", is_verified=True, organisation_name="Axiom", **extra):
-    organisation, _ = Organisation.objects.get_or_create(name=organisation_name)
+def create_user(email="ada@example.com", is_verified=True, organisation_name=None, **extra):
+    # One organisation per user by default: an organisation has at most one super admin.
+    organisation, _ = Organisation.objects.get_or_create(name=organisation_name or f"Org of {email.lower()}")
+    extra.setdefault("account_type", User.SUPER_ADMIN)
     return User.objects.create_user(
         username=email.split("@")[0],
         email=email,
@@ -710,9 +713,9 @@ LOGOUT_URL = "/api/v1/auth/logout/"
 
 @pytest.mark.django_db
 def test_login_returns_tokens_and_profile():
-    user = create_user("ada@example.com")
+    user = create_user("ada@example.com", organisation_name="Axiom")
 
-    result = AuthService.login(None, "ada@example.com", "Str0ng-Passw0rd!")
+    result = AuthService.login(None, "ada@example.com", "Str0ng-Passw0rd!", "super_admin")
 
     assert str(AccessToken(result["access"])["user_id"]) == str(user.id)
     assert str(RefreshToken(result["refresh"])["user_id"]) == str(user.id)
@@ -723,6 +726,7 @@ def test_login_returns_tokens_and_profile():
         "organization": "Axiom",
         "department": "operations",
         "role": "fraud_analyst",
+        "account_type": "super_admin",
     }
     user.refresh_from_db()
     assert user.last_login is not None
@@ -734,7 +738,7 @@ def test_login_accepts_email_in_any_letter_case():
 
     stored = User.objects.get().email
 
-    result = AuthService.login(None, "mixed.case@EXAMPLE.com", "Str0ng-Passw0rd!")
+    result = AuthService.login(None, "mixed.case@EXAMPLE.com", "Str0ng-Passw0rd!", "super_admin")
 
     assert result["user"]["email"] == stored
 
@@ -744,7 +748,7 @@ def test_login_accepts_email_in_any_letter_case():
 def test_login_wrong_password_and_unknown_email_look_the_same(api_client, email, password):
     create_user("ada@example.com")
 
-    response = api_client.post(LOGIN_URL, {"email": email, "password": password}, format="json")
+    response = api_client.post(LOGIN_URL, {"email": email, "password": password, "role": "super_admin"}, format="json")
 
     assert response.status_code == 401
     assert response.json() == {"error": INVALID_CREDENTIALS_MESSAGE}
@@ -754,7 +758,7 @@ def test_login_wrong_password_and_unknown_email_look_the_same(api_client, email,
 def test_login_refuses_deactivated_account(api_client):
     create_user("ada@example.com", is_active=False)
 
-    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json")
 
     assert response.status_code == 401
     assert response.json() == {"error": INVALID_CREDENTIALS_MESSAGE}
@@ -764,8 +768,8 @@ def test_login_refuses_deactivated_account(api_client):
 def test_login_unverified_account_gets_403_only_with_the_right_password(api_client):
     create_user("legacy@example.com", is_verified=False)
 
-    right = api_client.post(LOGIN_URL, {"email": "legacy@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
-    wrong = api_client.post(LOGIN_URL, {"email": "legacy@example.com", "password": "nope-nope-nope"}, format="json")
+    right = api_client.post(LOGIN_URL, {"email": "legacy@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json")
+    wrong = api_client.post(LOGIN_URL, {"email": "legacy@example.com", "password": "nope-nope-nope", "role": "super_admin"}, format="json")
 
     assert right.status_code == 403
     assert right.json() == {"error": EMAIL_NOT_VERIFIED_MESSAGE}
@@ -776,7 +780,7 @@ def test_login_unverified_account_gets_403_only_with_the_right_password(api_clie
 def test_login_endpoint_returns_200_body(api_client):
     create_user("ada@example.com")
 
-    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json")
 
     assert response.status_code == 200
     body = response.json()
@@ -801,7 +805,7 @@ def test_public_endpoints_ignore_a_stale_authorization_header(api_client):
     create_user("ada@example.com")
     api_client.credentials(HTTP_AUTHORIZATION="Bearer expired-or-garbage")
 
-    login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json")
+    login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json")
     signup = api_client.post(SIGNUP_URL, signup_data("new.person@example.com"), format="json")
     send = api_client.post(SEND_OTP_URL, {"email": "another@example.com"}, format="json")
 
@@ -813,7 +817,7 @@ def test_public_endpoints_ignore_a_stale_authorization_header(api_client):
 @pytest.mark.django_db
 def test_access_token_authenticates_a_protected_request(api_client):
     create_user("ada@example.com")
-    tokens = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json").json()
+    tokens = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json").json()
 
     anonymous = api_client.post(LOGOUT_URL, {"refresh": tokens["refresh"]}, format="json")
     api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
@@ -894,7 +898,7 @@ def test_refresh_rejects_deleted_user():
 @pytest.mark.django_db
 def test_refresh_endpoint_returns_access_token_that_authenticates(api_client):
     create_user("ada@example.com")
-    refresh = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}, format="json").json()["refresh"]
+    refresh = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json").json()["refresh"]
 
     response = api_client.post(REFRESH_URL, {"refresh": refresh}, format="json")
 
@@ -945,7 +949,7 @@ def test_refresh_endpoint_ignores_a_stale_authorization_header(api_client):
 
 
 def login_tokens(api_client, email="ada@example.com"):
-    return api_client.post(LOGIN_URL, {"email": email, "password": "Str0ng-Passw0rd!"}, format="json").json()
+    return api_client.post(LOGIN_URL, {"email": email, "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json").json()
 
 
 @pytest.mark.django_db
@@ -1347,7 +1351,7 @@ def test_reset_password_changes_password_and_ends_every_session(api_client):
     assert user.check_password(NEW_PASSWORD)
     assert not user.check_password("Str0ng-Passw0rd!")
     assert api_client.post(REFRESH_URL, {"refresh": old_refresh}, format="json").status_code == 401
-    new_login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": NEW_PASSWORD}, format="json")
+    new_login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": NEW_PASSWORD, "role": "super_admin"}, format="json")
     assert new_login.status_code == 200
 
 
@@ -1691,7 +1695,7 @@ def test_other_auth_endpoints_are_not_throttled(api_client):
     create_user("ada@example.com")
 
     statuses = {
-        api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "wrong"}, format="json").status_code
+        api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "wrong", "role": "super_admin"}, format="json").status_code
         for _ in range(8)
     }
 
@@ -1878,7 +1882,7 @@ def test_login_shows_an_empty_organisation_for_staff_without_one():
     user = create_user("staff@example.com")
     User.objects.filter(pk=user.pk).update(organisation=None)
 
-    result = AuthService.login(None, "staff@example.com", "Str0ng-Passw0rd!")
+    result = AuthService.login(None, "staff@example.com", "Str0ng-Passw0rd!", "super_admin")
 
     assert result["user"]["organization"] == ""
 
@@ -1935,3 +1939,176 @@ def test_createsuperuser_works_without_an_organisation():
     call_command("createsuperuser", interactive=False, username="admin", email="admin@example.com", verbosity=0)
 
     assert User.objects.get(username="admin").organisation is None
+
+
+# ---- 29: Super admin signup and role-checked login ----
+
+
+@pytest.mark.django_db
+def test_signup_makes_the_new_user_the_super_admin():
+    user = AuthService.signup(signup_data())
+
+    assert user.account_type == "super_admin"
+
+
+@pytest.mark.django_db
+def test_legacy_signup_makes_the_account_super_admin():
+    legacy = create_user("legacy.user@example.com", is_verified=False, account_type="")
+
+    user = AuthService.signup(signup_data("legacy.user@example.com"))
+
+    assert user.id == legacy.id
+    assert user.account_type == "super_admin"
+
+
+@pytest.mark.django_db
+def test_an_organisation_cannot_have_two_super_admins():
+    first = create_user("first@example.com")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        create_user("second@example.com", organisation_name=first.organisation.name)
+
+
+@pytest.mark.django_db
+def test_team_members_may_share_an_organisation_with_its_super_admin():
+    admin = create_user("admin.coop@example.com")
+
+    create_user("member.coop@example.com", organisation_name=admin.organisation.name, account_type="team_member")
+
+    assert admin.organisation.users.count() == 2
+
+
+BEFORE_ACCOUNT_TYPES = [("accounts", "0006_remove_user_organization_and_more")]
+WITH_ACCOUNT_TYPES = [("accounts", "0007_user_account_type")]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_account_type_migration_makes_existing_accounts_super_admins():
+    try:
+        old_apps = migrate_to(BEFORE_ACCOUNT_TYPES)
+        OldUser = old_apps.get_model("accounts", "User")
+        OldOrganisation = old_apps.get_model("accounts", "Organisation")
+        coop = OldOrganisation.objects.create(name="Ikeja Coop")
+        OldUser.objects.create(username="owner", email="owner@example.com", organisation=coop)
+        OldUser.objects.create(username="staff", email="staff@example.com", is_staff=True)
+
+        new_apps = migrate_to(WITH_ACCOUNT_TYPES)
+        types = dict(new_apps.get_model("accounts", "User").objects.values_list("email", "account_type"))
+        assert types == {"owner@example.com": "super_admin", "staff@example.com": ""}
+
+        migrate_to(BEFORE_ACCOUNT_TYPES)
+    finally:
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flag", ["is_staff", "is_superuser"])
+def test_signup_cannot_take_over_a_staff_or_superuser_account(flag):
+    staff = create_user("ops@example.com", is_verified=False, account_type="", **{flag: True})
+    User.objects.filter(pk=staff.pk).update(organisation=None)
+
+    with pytest.raises(ValidationError) as excinfo:
+        AuthService.signup(signup_data("ops@example.com"))
+
+    assert excinfo.value.detail == {"error": ACCOUNT_EXISTS_MESSAGE}
+    staff.refresh_from_db()
+    assert staff.check_password("Str0ng-Passw0rd!")
+    assert staff.is_verified is False
+    assert staff.organisation is None
+    assert staff.account_type == ""
+
+
+@pytest.mark.django_db
+def test_legacy_signup_leaves_a_shared_organisation_alone():
+    legacy = create_user("legacy.user@example.com", is_verified=False, organisation_name="Shared Coop", account_type="")
+    create_user("colleague@example.com", organisation_name="Shared Coop", account_type="team_member")
+
+    user = AuthService.signup(signup_data("legacy.user@example.com", organization="Fresh Coop"))
+
+    assert user.organisation.name == "Fresh Coop"
+    assert user.organisation_id != legacy.organisation_id
+    assert Organisation.objects.get(pk=legacy.organisation_id).name == "Shared Coop"
+
+
+WRONG_ROLE = {"error": WRONG_SIGN_IN_ROLE_MESSAGE}
+
+
+@pytest.mark.django_db
+def test_login_with_the_matching_role_returns_the_account_type(api_client):
+    create_user("ada@example.com")
+
+    response = api_client.post(
+        LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["account_type"] == "super_admin"
+
+
+@pytest.mark.django_db
+def test_team_member_logs_in_only_as_team_member(api_client):
+    admin = create_user("admin.coop@example.com")
+    create_user("member.coop@example.com", organisation_name=admin.organisation.name, account_type="team_member")
+    body = {"email": "member.coop@example.com", "password": "Str0ng-Passw0rd!"}
+
+    as_member = api_client.post(LOGIN_URL, {**body, "role": "team_member"}, format="json")
+    as_admin = api_client.post(LOGIN_URL, {**body, "role": "super_admin"}, format="json")
+
+    assert as_member.status_code == 200
+    assert as_member.json()["user"]["account_type"] == "team_member"
+    assert as_admin.status_code == 403
+    assert as_admin.json() == WRONG_ROLE
+
+
+@pytest.mark.django_db
+def test_wrong_role_with_the_right_password_gets_403_and_no_tokens(api_client):
+    create_user("ada@example.com")
+
+    response = api_client.post(
+        LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "team_member"}, format="json"
+    )
+
+    assert response.status_code == 403
+    assert response.json() == WRONG_ROLE
+    assert OutstandingToken.objects.count() == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("role", ["super_admin", "team_member"])
+def test_wrong_password_gets_the_plain_401_whatever_the_role(api_client, role):
+    create_user("ada@example.com")
+
+    response = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "nope-nope-nope", "role": role}, format="json")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": INVALID_CREDENTIALS_MESSAGE}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "role, error",
+    [(None, "This field is required."), ("admin", '"admin" is not a valid choice.'), ("", '"" is not a valid choice.')],
+)
+def test_login_requires_a_valid_role(api_client, role, error):
+    create_user("ada@example.com")
+    body = {"email": "ada@example.com", "password": "Str0ng-Passw0rd!"}
+    if role is not None:
+        body["role"] = role
+
+    response = api_client.post(LOGIN_URL, body, format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"role": [error]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("role", ["super_admin", "team_member"])
+def test_staff_account_without_a_type_cannot_log_in_to_the_app(api_client, role):
+    staff = create_user("ops@example.com", account_type="", is_staff=True)
+    User.objects.filter(pk=staff.pk).update(organisation=None)
+
+    response = api_client.post(LOGIN_URL, {"email": "ops@example.com", "password": "Str0ng-Passw0rd!", "role": role}, format="json")
+
+    assert response.status_code == 403
+    assert response.json() == WRONG_ROLE

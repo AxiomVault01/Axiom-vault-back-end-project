@@ -55,6 +55,13 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(
         write_only=True, required=True, help_text="The account's password."
     )
+    role = serializers.ChoiceField(
+        choices=["super_admin", "team_member"],
+        required=True,
+        help_text="Which kind of account the user is signing in as, from the Sign In screen: "
+        "`super_admin` (the person who registered the Cooperative) or `team_member` (added by "
+        "the super admin). It must match the account, or login returns 403.",
+    )
 
 class RefreshTokenSerializer(serializers.Serializer):
     refresh = serializers.CharField(
