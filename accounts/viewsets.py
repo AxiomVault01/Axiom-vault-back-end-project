@@ -80,13 +80,18 @@ LoginUserSchema = inline_serializer(
             "`risk_management`, `human_resources`, `others`."
         ),
         "role": serializers.CharField(
-            help_text="`fraud_analyst`, `compliance_officer`, `auditor`, `manager`, or an empty "
-            "string when an admin has not assigned a role yet."
+            help_text="Job title, free text the super admin wrote for a team member (e.g. "
+            "`Payroll Analyst`). Usually empty for a super admin. A label only; it grants nothing."
         ),
         "account_type": serializers.ChoiceField(
             choices=["super_admin", "team_member"],
             help_text="`super_admin` for the person who registered the Cooperative (one per "
             "organisation), `team_member` for people the super admin added.",
+        ),
+        "must_change_password": serializers.BooleanField(
+            help_text="`true` for a team member still using the temporary password the super admin "
+            "gave them. Show the change-password screen: every other endpoint answers 403 until it "
+            "is changed.",
         ),
     },
 )
@@ -466,10 +471,13 @@ class AuthViewSet(viewsets.ViewSet):
             "token expires, and send it when logging out. Store both securely; never put them in "
             "URLs or logs.\n\n"
             "**The `user` object**\n"
-            "- Use `full_name` for display. `role` is an empty string until an admin assigns one; "
-            "the frontend can show a *waiting for access* message in that case.\n"
+            "- Use `full_name` for display. `role` is the job title the super admin wrote for a "
+            "team member (empty for a super admin); it is a label only.\n"
             "- `account_type` is `super_admin` or `team_member`. Use it to decide which screens "
-            "to show, for example team management only for `super_admin`.\n\n"
+            "to show, for example team management only for `super_admin`.\n"
+            "- `must_change_password` is `true` for a team member on a temporary password. Go "
+            "straight to the change-password screen; every other endpoint except logout answers "
+            "`403` with `code: password_change_required` until the password is changed.\n\n"
             "**Responses**\n"
             "- `200`: logged in; store the tokens and continue into the app.\n"
             "- `400`: a field is missing, the email is not a valid address, or `role` is not "
@@ -515,6 +523,7 @@ class AuthViewSet(viewsets.ViewSet):
                                 "department": "internal_audit",
                                 "role": "",
                                 "account_type": "super_admin",
+                                "must_change_password": False,
                             },
                         },
                     )

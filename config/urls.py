@@ -13,6 +13,9 @@ urlpatterns = [
     # Authentication
     path("api/v1/auth/", include("accounts.urls")),
 
+    # Team management (organisation super admin)
+    path("api/v1/team/", include("accounts.team_urls")),
+
     # Fraud Detection
     path("api/v1/fraud/", include("fraud.urls")),
 

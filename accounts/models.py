@@ -33,14 +33,11 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     is_verified = models.BooleanField(default=False)
 
-    ROLE_CHOICES = [
-        ("fraud_analyst", "Fraud Analyst"),
-        ("compliance_officer", "Compliance Officer"),
-        ("auditor", "External Auditor"),
-        ("manager", "Customer Success Manager"),
-    ]
-
-    role = models.CharField(max_length=50, choices=ROLE_CHOICES, blank=True, default="")
+    # Free text the super admin writes (a job title). A label only; account_type decides access.
+    role = models.CharField(max_length=100, blank=True, default="")
+    phone_number = models.CharField(max_length=20, blank=True, default="")
+    # Set for a team member's temporary password; cleared by change or reset password.
+    must_change_password = models.BooleanField(default=False)
 
     SUPER_ADMIN = "super_admin"
     TEAM_MEMBER = "team_member"
