@@ -22,6 +22,7 @@ from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from .models import OTP, Organisation, User
+from .serializers import EMAIL_TAKEN_MESSAGE
 from .tasks import send_otp_email_task, send_password_changed_email_task
 
 logger = logging.getLogger(__name__)
@@ -416,6 +417,7 @@ class AuthService:
                 "department": user.department,
                 "role": user.role,
                 "account_type": user.account_type,
+                "must_change_password": user.must_change_password,
             },
         }
 
@@ -474,7 +476,8 @@ class AuthService:
 
         with transaction.atomic():
             user.set_password(new_password)
-            user.save(update_fields=["password"])
+            user.must_change_password = False
+            user.save(update_fields=["password", "must_change_password"])
             blacklist_all_refresh_tokens(user)
             refresh = RefreshToken.for_user(user)
             notify_password_changed(user, HOW_CHANGED, device_info)
@@ -496,7 +499,8 @@ class AuthService:
 
         with transaction.atomic():
             user.set_password(new_password)
-            user.save(update_fields=["password"])
+            user.must_change_password = False
+            user.save(update_fields=["password", "must_change_password"])
             OTP.objects.filter(email__iexact=user.email, purpose="password_reset", is_used=False).update(
                 is_used=True
             )
@@ -516,3 +520,66 @@ class AuthService:
             raise LogoutWrongAccount()
 
         token.blacklist()
+
+
+class TeamService:
+    """A super admin managing the team members of their own organisation."""
+
+    @staticmethod
+    def members_of(super_admin):
+        """Every team member in the super admin's organisation, newest first. Nothing else is reachable."""
+        return User.objects.filter(
+            organisation=super_admin.organisation, account_type=User.TEAM_MEMBER
+        ).order_by("-date_joined")
+
+    @staticmethod
+    def add_member(super_admin, data: dict) -> User:
+        """Creates a verified team member with a temporary password they must change on first login."""
+        full_name = data["full_name"].strip()
+        try:
+            validate_password(data["password"], user=User(email=data["email"], full_name=full_name))
+        except DjangoValidationError as exc:
+            raise ValidationError({"password": list(exc.messages)})
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    username=uuid.uuid4().hex,
+                    email=data["email"],
+                    password=data["password"],
+                    full_name=full_name,
+                    phone_number=data["phone_number"],
+                    role=data["role"].strip(),
+                    department="",
+                    organisation=super_admin.organisation,
+                    account_type=User.TEAM_MEMBER,
+                    is_verified=True,
+                    must_change_password=True,
+                )
+        except IntegrityError:
+            # Two requests adding the same email at once: the unique email index stops the second.
+            raise ValidationError({"email": [EMAIL_TAKEN_MESSAGE]})
+
+    @staticmethod
+    def update_member(member: User, data: dict) -> User:
+        """Changes only the fields that were sent."""
+        for field in ("full_name", "role"):
+            if field in data:
+                data[field] = data[field].strip()
+        for field, value in data.items():
+            setattr(member, field, value)
+        try:
+            with transaction.atomic():
+                member.save(update_fields=list(data) or None)
+        except IntegrityError:
+            raise ValidationError({"email": [EMAIL_TAKEN_MESSAGE]})
+        return member
+
+    @staticmethod
+    def set_active(member: User, active: bool) -> User:
+        """Deactivating also ends every session at once; both directions are safe to repeat."""
+        with transaction.atomic():
+            member.is_active = active
+            member.save(update_fields=["is_active"])
+            if not active:
+                blacklist_all_refresh_tokens(member)
+        return member

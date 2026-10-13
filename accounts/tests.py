@@ -727,6 +727,7 @@ def test_login_returns_tokens_and_profile():
         "department": "operations",
         "role": "fraud_analyst",
         "account_type": "super_admin",
+        "must_change_password": False,
     }
     user.refresh_from_db()
     assert user.last_login is not None
@@ -2112,3 +2113,269 @@ def test_staff_account_without_a_type_cannot_log_in_to_the_app(api_client, role)
 
     assert response.status_code == 403
     assert response.json() == WRONG_ROLE
+
+
+# ---- 30: Team member management ----
+
+TEAM_URL = "/api/v1/team/members/"
+FRAUD_RESULTS_URL = "/api/v1/fraud/results/"
+TEMP_PASSWORD = "Temp-Ledger-2026!"
+SUPER_ADMIN_ONLY = {"error": "Only the super admin can manage the team."}
+PASSWORD_CHANGE_REQUIRED = {
+    "error": "Change your temporary password before continuing.",
+    "code": "password_change_required",
+}
+
+
+def member_url(member_id, action=""):
+    return f"{TEAM_URL}{member_id}/" + (f"{action}/" if action else "")
+
+
+def bearer(client, user):
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + str(AccessToken.for_user(user)))
+    return client
+
+
+def new_member_data(**overrides):
+    data = {
+        "full_name": "Ada Obi",
+        "phone_number": "+234 801-234-5678",
+        "role": "Payroll Analyst",
+        "email": "Ada.Obi@IkejaCoop.ng",
+        "password": TEMP_PASSWORD,
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.fixture
+def super_admin():
+    return create_user("owner@ikejacoop.ng", organisation_name="Ikeja Coop")
+
+
+def add_member(admin, **overrides):
+    response = bearer(APIClient(), admin).post(TEAM_URL, new_member_data(**overrides), format="json")
+    assert response.status_code == 201, response.json()
+    return User.objects.get(pk=response.json()["id"])
+
+
+def member_login_body(member, password=TEMP_PASSWORD):
+    return {"email": member.email, "password": password, "role": "team_member"}
+
+
+@pytest.mark.django_db
+def test_super_admin_adds_a_team_member(api_client, super_admin):
+    response = bearer(api_client, super_admin).post(TEAM_URL, new_member_data(), format="json")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body) == {
+        "id", "full_name", "email", "phone_number", "role", "is_active", "must_change_password", "date_joined"
+    }
+    assert body["email"] == "ada.obi@ikejacoop.ng"
+    assert body["phone_number"] == "+2348012345678"
+    assert body["must_change_password"] is True
+    member = User.objects.get(pk=body["id"])
+    assert member.account_type == "team_member"
+    assert member.organisation == super_admin.organisation
+    assert member.is_verified is True
+    assert member.check_password(TEMP_PASSWORD) and member.password != TEMP_PASSWORD
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "overrides, field",
+    [
+        ({"full_name": ""}, "full_name"),
+        ({"phone_number": "12345"}, "phone_number"),
+        ({"phone_number": "080-ABC-1234"}, "phone_number"),
+        ({"role": ""}, "role"),
+        ({"role": "R" * 101}, "role"),
+        ({"email": "not-an-email"}, "email"),
+        ({"password": "short"}, "password"),
+        ({"password": "AdaObiIkeja"}, "password"),
+    ],
+)
+def test_add_member_rejects_invalid_fields(api_client, super_admin, overrides, field):
+    response = bearer(api_client, super_admin).post(TEAM_URL, new_member_data(**overrides), format="json")
+
+    assert response.status_code == 400
+    assert field in response.json()
+    assert not User.objects.filter(account_type="team_member").exists()
+
+
+@pytest.mark.django_db
+def test_add_member_requires_every_field(api_client, super_admin):
+    response = bearer(api_client, super_admin).post(TEAM_URL, {}, format="json")
+
+    assert response.status_code == 400
+    assert set(response.json()) == {"full_name", "phone_number", "role", "email", "password"}
+
+
+@pytest.mark.django_db
+def test_add_member_refuses_an_email_in_use_in_any_letter_case(api_client, super_admin):
+    create_user("taken@example.com")
+
+    response = bearer(api_client, super_admin).post(TEAM_URL, new_member_data(email="TAKEN@example.com"), format="json")
+
+    assert response.status_code == 400
+    assert response.json() == {"email": ["An account with this email already exists."]}
+
+
+@pytest.mark.django_db
+def test_team_endpoints_need_a_token(api_client):
+    assert api_client.get(TEAM_URL).status_code == 401
+    assert api_client.post(TEAM_URL, new_member_data(), format="json").status_code == 401
+
+
+@pytest.mark.django_db
+def test_team_member_cannot_manage_the_team(api_client, super_admin):
+    member = add_member(super_admin)
+    User.objects.filter(pk=member.pk).update(must_change_password=False)
+    member.refresh_from_db()
+
+    as_member = bearer(api_client, member)
+    listed = as_member.get(TEAM_URL)
+    added = as_member.post(TEAM_URL, new_member_data(email="x@ikejacoop.ng"), format="json")
+
+    assert listed.status_code == added.status_code == 403
+    assert added.json() == SUPER_ADMIN_ONLY
+
+
+@pytest.mark.django_db
+def test_list_and_detail_show_only_my_own_team(api_client, super_admin):
+    mine = add_member(super_admin)
+    other_admin = create_user("boss@lekkicoop.ng", organisation_name="Lekki Coop")
+    theirs = add_member(other_admin, email="tunde@lekkicoop.ng")
+
+    client = bearer(api_client, super_admin)
+    listed = client.get(TEAM_URL)
+
+    assert listed.status_code == 200
+    assert [m["id"] for m in listed.json()] == [str(mine.id)]
+    assert client.get(member_url(mine.id)).json()["email"] == mine.email
+    assert client.get(member_url(theirs.id)).status_code == 404
+    assert client.get(member_url(super_admin.id)).status_code == 404
+
+
+@pytest.mark.django_db
+def test_list_is_newest_first(api_client, super_admin):
+    first = add_member(super_admin, email="first@ikejacoop.ng")
+    second = add_member(super_admin, email="second@ikejacoop.ng")
+    User.objects.filter(pk=first.pk).update(date_joined=timezone.now() - timedelta(days=1))
+
+    listed = bearer(api_client, super_admin).get(TEAM_URL).json()
+
+    assert [m["id"] for m in listed] == [str(second.id), str(first.id)]
+
+
+@pytest.mark.django_db
+def test_edit_changes_only_the_fields_sent(api_client, super_admin):
+    member = add_member(super_admin)
+
+    response = bearer(api_client, super_admin).patch(
+        member_url(member.id),
+        {"role": " Senior Payroll Analyst ", "account_type": "super_admin", "is_active": False, "organisation": None},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    member.refresh_from_db()
+    assert member.role == "Senior Payroll Analyst"
+    assert member.full_name == "Ada Obi"
+    assert member.account_type == "team_member"
+    assert member.is_active is True
+    assert member.organisation == super_admin.organisation
+
+
+@pytest.mark.django_db
+def test_edit_rejects_a_taken_email_and_bad_values(api_client, super_admin):
+    member = add_member(super_admin)
+    create_user("taken@example.com")
+    client = bearer(api_client, super_admin)
+
+    assert client.patch(member_url(member.id), {"email": "Taken@Example.com"}, format="json").status_code == 400
+    assert client.patch(member_url(member.id), {"phone_number": "12"}, format="json").status_code == 400
+    assert client.patch(member_url(member.id), {"email": "ADA.OBI@ikejacoop.ng"}, format="json").status_code == 200
+    assert client.put(member_url(member.id), new_member_data(), format="json").status_code == 405
+
+
+@pytest.mark.django_db
+def test_deactivate_ends_sessions_and_reactivate_restores_login(api_client, super_admin):
+    member = add_member(super_admin)
+    User.objects.filter(pk=member.pk).update(must_change_password=False)
+    refresh = APIClient().post(LOGIN_URL, member_login_body(member), format="json").json()["refresh"]
+    admin_client = bearer(api_client, super_admin)
+
+    first = admin_client.post(member_url(member.id, "deactivate"))
+    again = admin_client.post(member_url(member.id, "deactivate"))
+
+    assert first.status_code == again.status_code == 200
+    assert first.json()["is_active"] is False
+    assert APIClient().post(REFRESH_URL, {"refresh": refresh}, format="json").status_code == 401
+    assert APIClient().post(LOGIN_URL, member_login_body(member), format="json").status_code == 401
+
+    restored = admin_client.post(member_url(member.id, "reactivate"))
+    assert restored.status_code == 200 and restored.json()["is_active"] is True
+    assert APIClient().post(LOGIN_URL, member_login_body(member), format="json").status_code == 200
+
+
+@pytest.mark.django_db
+def test_edit_and_deactivate_404_for_another_organisation(api_client, super_admin):
+    other_admin = create_user("boss@lekkicoop.ng", organisation_name="Lekki Coop")
+    theirs = add_member(other_admin, email="tunde@lekkicoop.ng")
+    client = bearer(api_client, super_admin)
+
+    assert client.patch(member_url(theirs.id), {"role": "x"}, format="json").status_code == 404
+    assert client.post(member_url(theirs.id, "deactivate")).status_code == 404
+    assert client.post(member_url(theirs.id, "reactivate")).status_code == 404
+    theirs.refresh_from_db()
+    assert theirs.is_active is True and theirs.role == "Payroll Analyst"
+
+
+@pytest.mark.django_db
+def test_new_member_must_change_the_temporary_password_first(super_admin):
+    member = add_member(super_admin)
+    client = APIClient()
+
+    login = client.post(LOGIN_URL, member_login_body(member), format="json")
+    assert login.status_code == 200
+    assert login.json()["user"]["must_change_password"] is True
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + login.json()["access"])
+
+    blocked = client.get(FRAUD_RESULTS_URL)
+    assert blocked.status_code == 403
+    assert blocked.json() == PASSWORD_CHANGE_REQUIRED
+
+    changed = client.post(
+        CHANGE_URL,
+        {"current_password": TEMP_PASSWORD, "new_password": "Own-Ledger-2026!", "re_enter_password": "Own-Ledger-2026!"},
+        format="json",
+    )
+    assert changed.status_code == 200, changed.json()
+    member.refresh_from_db()
+    assert member.must_change_password is False
+
+    # The block is gone: the team list now refuses only because a member is not the super admin.
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + changed.json()["access"])
+    assert client.get(TEAM_URL).json() == SUPER_ADMIN_ONLY
+
+
+@pytest.mark.django_db
+def test_member_with_a_temporary_password_can_still_log_out(super_admin):
+    member = add_member(super_admin)
+    client = APIClient()
+    tokens = client.post(LOGIN_URL, member_login_body(member), format="json").json()
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + tokens["access"])
+
+    assert client.post(LOGOUT_URL, {"refresh": tokens["refresh"]}, format="json").status_code == 200
+
+
+@pytest.mark.django_db
+def test_password_reset_also_clears_the_temporary_password_flag(super_admin):
+    member = add_member(super_admin)
+
+    AuthService.reset_password(PasswordResetToken.issue(member), "Own-Ledger-2026!")
+
+    member.refresh_from_db()
+    assert member.must_change_password is False
