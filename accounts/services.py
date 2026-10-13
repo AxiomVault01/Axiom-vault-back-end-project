@@ -489,7 +489,7 @@ class AuthService:
         }
 
     @staticmethod
-    def reset_password(reset_token: str, new_password: str, device_info: dict | None = None) -> None:
+    def reset_password(reset_token: str, new_password: str, device_info: dict | None = None) -> User:
         """Sets the new password for the reset token's user and ends all of their sessions."""
         user = PasswordResetToken.read(reset_token)
         try:
@@ -506,6 +506,7 @@ class AuthService:
             )
             blacklist_all_refresh_tokens(user)
             notify_password_changed(user, HOW_RESET, device_info or {})
+        return user
 
     @staticmethod
     def logout(user, refresh: str) -> None:

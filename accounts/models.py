@@ -1,7 +1,10 @@
 import uuid
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.core.exceptions import PermissionDenied
 from django.db.models.functions import Lower
+
+from .device import UNKNOWN_IP, client_ip
 
 
 class Organisation(models.Model):
@@ -136,4 +139,86 @@ class OTP(models.Model):
         return (
             not self.is_used
             and not self.is_expired
+        )
+
+class AuditLogQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PermissionDenied("Audit log rows cannot be changed.")
+
+    def delete(self):
+        raise PermissionDenied("Audit log rows cannot be deleted.")
+
+
+class AuditLog(models.Model):
+    """One append-only row per important action: who, in which organisation, what, to what, when."""
+
+    SIGNUP = "signup"
+    LOGIN = "login"
+    LOGOUT = "logout"
+    PASSWORD_CHANGED = "password_changed"
+    PASSWORD_RESET = "password_reset"
+    TEAM_MEMBER_ADDED = "team_member_added"
+    TEAM_MEMBER_UPDATED = "team_member_updated"
+    TEAM_MEMBER_DEACTIVATED = "team_member_deactivated"
+    TEAM_MEMBER_REACTIVATED = "team_member_reactivated"
+    ACTION_CHOICES = [
+        (SIGNUP, "Signed up"),
+        (LOGIN, "Logged in"),
+        (LOGOUT, "Logged out"),
+        (PASSWORD_CHANGED, "Changed password"),
+        (PASSWORD_RESET, "Reset password"),
+        (TEAM_MEMBER_ADDED, "Added a team member"),
+        (TEAM_MEMBER_UPDATED, "Edited a team member"),
+        (TEAM_MEMBER_DEACTIVATED, "Deactivated a team member"),
+        (TEAM_MEMBER_REACTIVATED, "Reactivated a team member"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    action = models.CharField(max_length=50, choices=ACTION_CHOICES)
+    # The copies keep a row meaningful after the user or organisation is deleted.
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    actor_email = models.CharField(max_length=254, blank=True, default="")
+    organisation = models.ForeignKey(
+        Organisation, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    organisation_name = models.CharField(max_length=255, blank=True, default="")
+    target_type = models.CharField(max_length=50, blank=True, default="")
+    target_id = models.CharField(max_length=64, blank=True, default="")
+    details = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    objects = AuditLogQuerySet.as_manager()
+
+    class Meta:
+        db_table = "audit_logs"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organisation", "created_at"]),
+            models.Index(fields=["action"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionDenied("Audit log rows cannot be changed.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("Audit log rows cannot be deleted.")
+
+    @classmethod
+    def record(cls, action, actor=None, target=None, details=None, request=None):
+        """Writes one row. The organisation is the actor's; never put passwords or tokens in details."""
+        organisation = getattr(actor, "organisation", None)
+        ip = client_ip(request.META) if request is not None else None
+        return cls.objects.create(
+            action=action,
+            actor=actor,
+            actor_email=getattr(actor, "email", "") or "",
+            organisation=organisation,
+            organisation_name=organisation.name if organisation else "",
+            target_type="user" if target is not None else "",
+            target_id=str(target.pk) if target is not None else "",
+            details=details or {},
+            ip_address=None if ip in (None, UNKNOWN_IP) else ip,
         )
