@@ -236,8 +236,10 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
-    # Allows everyone, like DRF's AllowAny, except a user who must change a temporary password.
+    # Every endpoint needs a logged-in user who has replaced any temporary password, unless the
+    # view says otherwise (the public auth endpoints, logout, and change password do).
     "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
         "accounts.permissions.PasswordChangeNotRequired",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",

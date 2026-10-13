@@ -2,7 +2,7 @@ import math
 
 from rest_framework import viewsets, status
 from rest_framework.exceptions import Throttled
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema, inline_serializer
@@ -202,10 +202,11 @@ class AuthViewSet(viewsets.ViewSet):
         return []
 
     def get_permissions(self):
-        # Logged-in actions answer 401 without a valid access token; the rest stay open.
+        # Logged-in actions answer 401 without a valid access token. They skip the temporary-password
+        # block, so a new team member can still change the password or log out. The rest stay open.
         if getattr(self, "action", None) in self.AUTHENTICATED_ACTIONS:
             return [IsAuthenticated()]
-        return super().get_permissions()
+        return [AllowAny()]
 
     def get_throttles(self):
         # Only change-password is limited for now; the other auth endpoints come in feature 11.

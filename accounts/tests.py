@@ -2379,3 +2379,122 @@ def test_password_reset_also_clears_the_temporary_password_flag(super_admin):
 
     member.refresh_from_db()
     assert member.must_change_password is False
+
+
+# ---- 6: Role-based authorization ----
+
+SOME_ID = "3f2a7c9e-1b4d-4e8a-9c2f-6d5e4b3a2c1d"
+PROTECTED_ROUTES = [
+    ("get", "/api/v1/fraud/"),
+    ("get", "/api/v1/fraud/results/"),
+    ("get", f"/api/v1/fraud/results/{SOME_ID}/"),
+    ("get", "/api/v1/fraud/results/flagged/"),
+    ("get", "/api/v1/fraud/alerts/"),
+    ("post", "/api/v1/fraud/alerts/"),
+    ("get", f"/api/v1/fraud/alerts/{SOME_ID}/"),
+    ("put", f"/api/v1/fraud/alerts/{SOME_ID}/"),
+    ("patch", f"/api/v1/fraud/alerts/{SOME_ID}/"),
+    ("delete", f"/api/v1/fraud/alerts/{SOME_ID}/"),
+    ("patch", f"/api/v1/fraud/alerts/{SOME_ID}/change_status/"),
+    ("get", f"/api/v1/fraud/alerts/{SOME_ID}/audit_logs/"),
+    ("get", "/api/v1/ingestion/"),
+    ("post", "/api/v1/ingestion/ingestion/upload-payroll/"),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("method, url", PROTECTED_ROUTES)
+def test_fraud_and_ingestion_routes_need_a_token(api_client, method, url):
+    response = getattr(api_client, method)(url, {}, format="json")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Authentication credentials were not provided."}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("method, url", PROTECTED_ROUTES[:2])
+def test_a_bad_token_is_refused(api_client, method, url):
+    api_client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-token")
+
+    assert getattr(api_client, method)(url).status_code == 401
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("url", ["/api/docs/", "/api/schema/", "/api/redoc/"])
+def test_api_docs_stay_public(api_client, url):
+    assert api_client.get(url).status_code == 200
+
+
+def permission_outcome(view_class, user, action="list"):
+    """Runs a real view's permission checks for a user without touching its (not yet migrated) tables."""
+    from rest_framework.exceptions import NotAuthenticated, PermissionDenied
+    from rest_framework.test import APIRequestFactory, force_authenticate
+
+    request = APIRequestFactory().get("/")
+    force_authenticate(request, user=user)
+    view = view_class()
+    view.action_map = {"get": action}
+    view.action = action
+    view.request = view.initialize_request(request)
+    view.format_kwarg = None
+    try:
+        view.check_permissions(view.request)
+    except NotAuthenticated:
+        return 401
+    except PermissionDenied as exc:
+        return exc.detail
+    return "allowed"
+
+
+def protected_views():
+    from fraud.viewsets import AlertViewSet, FraudResultViewSet
+    from ingestion.viewsets import IngestionViewSet
+
+    return [(FraudResultViewSet, "list"), (AlertViewSet, "list"), (IngestionViewSet, "upload_payroll")]
+
+
+@pytest.mark.django_db
+def test_super_admin_and_team_member_may_both_use_fraud_and_ingestion():
+    admin = create_user("owner@ikejacoop.ng", organisation_name="Ikeja Coop")
+    member = create_user("ada@ikejacoop.ng", organisation_name="Ikeja Coop", account_type="team_member")
+
+    for view_class, action in protected_views():
+        assert permission_outcome(view_class, admin, action) == "allowed"
+        assert permission_outcome(view_class, member, action) == "allowed"
+
+
+@pytest.mark.django_db
+def test_member_on_a_temporary_password_is_blocked_from_fraud_and_ingestion():
+    create_user("owner@ikejacoop.ng", organisation_name="Ikeja Coop")
+    member = create_user(
+        "ada@ikejacoop.ng", organisation_name="Ikeja Coop", account_type="team_member", must_change_password=True
+    )
+
+    for view_class, action in protected_views():
+        assert permission_outcome(view_class, member, action) == PASSWORD_CHANGE_REQUIRED
+
+
+@pytest.mark.django_db
+def test_only_the_super_admin_manages_the_team():
+    from accounts.team_viewsets import TeamMemberViewSet
+
+    admin = create_user("owner@ikejacoop.ng", organisation_name="Ikeja Coop")
+    member = create_user("ada@ikejacoop.ng", organisation_name="Ikeja Coop", account_type="team_member")
+    staff = create_user("ops@example.com", account_type="", is_staff=True)
+
+    assert permission_outcome(TeamMemberViewSet, admin) == "allowed"
+    assert permission_outcome(TeamMemberViewSet, member) == SUPER_ADMIN_ONLY
+    assert permission_outcome(TeamMemberViewSet, staff) == SUPER_ADMIN_ONLY
+
+
+@pytest.mark.django_db
+def test_public_auth_endpoints_ignore_the_login_requirement(api_client):
+    create_user("ada@example.com")
+
+    login = api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json")
+    refreshed = api_client.post(REFRESH_URL, {"refresh": login.json()["refresh"]}, format="json")
+    forgot = api_client.post(FORGOT_URL, {"email": "nobody@example.com"}, format="json")
+
+    assert login.status_code == 200
+    assert refreshed.status_code == 200
+    assert forgot.status_code == 200
