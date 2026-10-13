@@ -11,9 +11,9 @@ class OrganisationAdmin(admin.ModelAdmin):
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ("email", "full_name", "organisation", "role", "is_verified", "is_staff")
+    list_display = ("email", "full_name", "organisation", "account_type", "role", "is_verified", "is_staff")
     search_fields = ("email", "full_name", "organisation__name")
-    list_filter = ("role", "is_verified", "is_staff")
+    list_filter = ("account_type", "role", "is_verified", "is_staff")
     list_select_related = ("organisation",)
     ordering = ("-date_joined",)
 

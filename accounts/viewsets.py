@@ -10,6 +10,7 @@ from rest_framework import serializers
 from .services import (
     ACCOUNT_EXISTS_MESSAGE,
     ORGANISATION_TAKEN_MESSAGE,
+    WRONG_SIGN_IN_ROLE_MESSAGE,
     CODE_EXPIRED_MESSAGE,
     CODE_TOO_SOON_MESSAGE,
     EMAIL_NOT_VERIFIED_MESSAGE,
@@ -81,6 +82,11 @@ LoginUserSchema = inline_serializer(
         "role": serializers.CharField(
             help_text="`fraud_analyst`, `compliance_officer`, `auditor`, `manager`, or an empty "
             "string when an admin has not assigned a role yet."
+        ),
+        "account_type": serializers.ChoiceField(
+            choices=["super_admin", "team_member"],
+            help_text="`super_admin` for the person who registered the Cooperative (one per "
+            "organisation), `team_member` for people the super admin added.",
         ),
     },
 )
@@ -448,7 +454,11 @@ class AuthViewSet(viewsets.ViewSet):
             "the user's profile.\n\n"
             "**Request fields**\n"
             "- `email` (required): the account's email. Letter case does not matter.\n"
-            "- `password` (required).\n\n"
+            "- `password` (required).\n"
+            "- `role` (required): which kind of account the user is signing in as, chosen on the "
+            "Sign In screen. `super_admin` is the person who registered the Cooperative (every "
+            "signup is one); `team_member` is someone the super admin added. **New field: the "
+            "frontend must send it.**\n\n"
             "**Using the tokens**\n"
             "- `access` is valid for **30 minutes**. Send it on every protected request in the "
             "header `Authorization: Bearer <access>`.\n"
@@ -457,27 +467,33 @@ class AuthViewSet(viewsets.ViewSet):
             "URLs or logs.\n\n"
             "**The `user` object**\n"
             "- Use `full_name` for display. `role` is an empty string until an admin assigns one; "
-            "the frontend can show a *waiting for access* message in that case.\n\n"
+            "the frontend can show a *waiting for access* message in that case.\n"
+            "- `account_type` is `super_admin` or `team_member`. Use it to decide which screens "
+            "to show, for example team management only for `super_admin`.\n\n"
             "**Responses**\n"
             "- `200`: logged in; store the tokens and continue into the app.\n"
-            "- `400`: a field is missing or the email is not a valid address.\n"
+            "- `400`: a field is missing, the email is not a valid address, or `role` is not "
+            "`super_admin` or `team_member`.\n"
             "- `401`: wrong email or password, or the account is deactivated. The message is the "
             "same in every case on purpose, so the API never reveals which emails have accounts.\n"
             "- `403`: the password was correct but the email was never verified (an account from "
             "the old signup flow). Send the user to *Get Started* to register again; their old "
-            "account is replaced.\n\n"
+            "account is replaced. **Or** the password was correct but `role` does not match the "
+            "account: show the message and let the user pick the other option. No tokens are "
+            "issued. The message is the same in both directions, so it never names the account's "
+            "type.\n\n"
             "**Authentication:** none. Any `Authorization` header is ignored."
         ),
         request=LoginSerializer,
         examples=[
             OpenApiExample(
                 "Sign in",
-                value={"email": "juan@agency.gov", "password": "Bright-Ledger-2026!"},
+                value={"email": "juan@agency.gov", "password": "Bright-Ledger-2026!", "role": "super_admin"},
                 request_only=True,
             ),
             OpenApiExample(
-                "Email in any letter case",
-                value={"email": "Juan@Agency.GOV", "password": "Bright-Ledger-2026!"},
+                "Team member, email in any letter case",
+                value={"email": "Ada@Agency.GOV", "password": "Bright-Ledger-2026!", "role": "team_member"},
                 request_only=True,
             ),
         ],
@@ -498,6 +514,7 @@ class AuthViewSet(viewsets.ViewSet):
                                 "organization": "Agency Name",
                                 "department": "internal_audit",
                                 "role": "",
+                                "account_type": "super_admin",
                             },
                         },
                     )
@@ -509,6 +526,8 @@ class AuthViewSet(viewsets.ViewSet):
                 examples=[
                     OpenApiExample("Missing password", value={"password": ["This field is required."]}),
                     OpenApiExample("Invalid email", value={"email": ["Enter a valid email address."]}),
+                    OpenApiExample("Missing role", value={"role": ["This field is required."]}),
+                    OpenApiExample("Unknown role", value={"role": ['"admin" is not a valid choice.']}),
                 ],
             ),
             401: OpenApiResponse(
@@ -518,8 +537,14 @@ class AuthViewSet(viewsets.ViewSet):
             ),
             403: OpenApiResponse(
                 response=ErrorResponse,
-                description="Correct password, but the email was never verified. Register again.",
-                examples=[OpenApiExample("Email not verified", value={"error": EMAIL_NOT_VERIFIED_MESSAGE})],
+                description=(
+                    "Correct password, but the email was never verified (register again), or the "
+                    "selected `role` does not match the account (pick the other option)."
+                ),
+                examples=[
+                    OpenApiExample("Email not verified", value={"error": EMAIL_NOT_VERIFIED_MESSAGE}),
+                    OpenApiExample("Wrong sign-in role", value={"error": WRONG_SIGN_IN_ROLE_MESSAGE}),
+                ],
             ),
         },
     )
@@ -531,6 +556,7 @@ class AuthViewSet(viewsets.ViewSet):
             request,
             email=serializer.validated_data["email"],
             password=serializer.validated_data["password"],
+            role=serializer.validated_data["role"],
         )
         return Response(result, status=status.HTTP_200_OK)
 

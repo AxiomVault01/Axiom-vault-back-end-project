@@ -45,6 +45,9 @@ TOKEN_INVALID_MESSAGE = "Your email verification has expired. Please verify your
 SIGNUP_SUCCESS_MESSAGE = "Account created successfully. You can now sign in."
 INVALID_CREDENTIALS_MESSAGE = "Invalid email or password."
 EMAIL_NOT_VERIFIED_MESSAGE = "Your email is not verified. Please sign up again to verify your email."
+WRONG_SIGN_IN_ROLE_MESSAGE = (
+    "This account can't sign in with the selected role. Choose the other option and try again."
+)
 SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again."
 LOGOUT_SUCCESS_MESSAGE = "Logged out successfully."
 LOGOUT_TOKEN_INVALID_MESSAGE = "This session has already ended or the token is invalid."
@@ -137,6 +140,14 @@ class EmailNotVerified(APIException):
     def __init__(self):
         super().__init__()
         self.detail = {"error": EMAIL_NOT_VERIFIED_MESSAGE}
+
+
+class WrongSignInRole(APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": WRONG_SIGN_IN_ROLE_MESSAGE}
 
 
 class InvalidRefreshToken(APIException):
@@ -329,15 +340,20 @@ class AuthService:
             "full_name": validated_data["full_name"],
             "department": validated_data["department"],
             "role": "",
+            "account_type": User.SUPER_ADMIN,
             "is_verified": True,
         }
         try:
             with transaction.atomic():
                 legacy = list(User.objects.select_for_update().filter(email__iexact=email))
-                if len(legacy) > 1 or any(user.is_verified for user in legacy):
+                # Staff and superuser accounts are never taken over by signup, verified or not.
+                if len(legacy) > 1 or any(u.is_verified or u.is_staff or u.is_superuser for u in legacy):
                     raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
                 user = legacy[0] if legacy else None
                 organisation = user.organisation if user else None
+                # Only an organisation this account has to itself is renamed; a shared one is left alone.
+                if organisation and organisation.users.exclude(pk=user.pk).exists():
+                    organisation = None
 
                 # A taken name is refused, never joined; the account's own current name is fine.
                 taken = Organisation.objects.filter(name__iexact=organisation_name)
@@ -374,8 +390,8 @@ class AuthService:
             raise ValidationError({"error": ACCOUNT_EXISTS_MESSAGE})
 
     @staticmethod
-    def login(request, email: str, password: str) -> dict:
-        """Checks email and password and returns JWT access/refresh tokens with the user's profile."""
+    def login(request, email: str, password: str, role: str) -> dict:
+        """Checks email, password, and sign-in role, and returns JWT tokens with the user's profile."""
         stored_email = stored_email_for(email)
         user = authenticate(request, username=stored_email, password=password)
         if user is None:
@@ -383,6 +399,9 @@ class AuthService:
         # Checked only after the password is correct, so a guesser learns nothing.
         if not user.is_verified:
             raise EmailNotVerified()
+        # One message for every mismatch, so it never names the account's real type.
+        if role != user.account_type:
+            raise WrongSignInRole()
 
         refresh = RefreshToken.for_user(user)
         update_last_login(None, user)
@@ -396,6 +415,7 @@ class AuthService:
                 "organization": user.organisation.name if user.organisation else "",
                 "department": user.department,
                 "role": user.role,
+                "account_type": user.account_type,
             },
         }
 
