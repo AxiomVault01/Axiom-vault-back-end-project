@@ -5,3 +5,32 @@ def pytest_report_header(config):
     if engine == "sqlite3":
         return "test database: SQLite (no local Postgres reachable)"
     return f"test database: Postgres ({engine})"
+
+
+import pytest
+
+
+class FakeStorage:
+    """Stands in for Cloudinary in every test, so no test ever reaches the network."""
+
+    def __init__(self):
+        self.files = {}
+        self.deleted = []
+
+    def store_private(self, data, public_id):
+        self.files[public_id] = bytes(data)
+        return {"public_id": public_id, "bytes": len(data)}
+
+    def delete(self, public_id):
+        self.deleted.append(public_id)
+        self.files.pop(public_id, None)
+
+
+@pytest.fixture(autouse=True)
+def fake_storage(monkeypatch):
+    from config import file_storage
+
+    fake = FakeStorage()
+    monkeypatch.setattr(file_storage, "store_private", fake.store_private)
+    monkeypatch.setattr(file_storage, "delete", fake.delete)
+    return fake

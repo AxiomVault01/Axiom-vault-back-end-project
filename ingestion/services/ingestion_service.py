@@ -1,5 +1,9 @@
+import os
+import uuid
+
 from django.db import transaction
 
+from config import file_storage
 from ingestion.models import Payroll, PayrollUpload
 
 from .file_parser import FileError, FileParser
@@ -22,7 +26,12 @@ class UploadRejected(Exception):
 class IngestionService:
     @staticmethod
     def upload_payroll(file, user) -> tuple[PayrollUpload, list[str]]:
-        """Reads, standardises, and checks the whole file, then saves it all or nothing."""
+        """Reads, standardises, and checks the whole file, keeps the original, then saves it all or nothing.
+
+        Raises UploadRejected (400) or file_storage.StorageUnavailable (503); nothing is saved either way.
+        """
+        data = file.read()  # Stored exactly as checked: the parser reads the same bytes below.
+        file.seek(0)
         try:
             headers, raw_rows = FileParser.parse(file)
         except FileError as exc:
@@ -57,14 +66,27 @@ class IngestionService:
                 "validation_errors": errors[:MAX_ERRORS_SHOWN],
             })
 
-        with transaction.atomic():
-            upload = PayrollUpload.objects.create(
-                organisation=user.organisation,
-                uploaded_by=user,
-                file_name=(file.name or "")[:255],
-                row_count=len(rows),
-            )
-            Payroll.objects.bulk_create(
-                Payroll(organisation=user.organisation, upload=upload, **values) for _, values in rows
-            )
+        upload_id = uuid.uuid4()
+        extension = os.path.splitext(file.name or "")[1].lower()
+        stored = file_storage.store_private(
+            data, f"axiomvault/{user.organisation_id}/payroll/{upload_id}{extension}"
+        )
+        try:
+            with transaction.atomic():
+                upload = PayrollUpload.objects.create(
+                    id=upload_id,
+                    organisation=user.organisation,
+                    uploaded_by=user,
+                    file_name=(file.name or "")[:255],
+                    row_count=len(rows),
+                    source_public_id=stored["public_id"],
+                    file_size=stored["bytes"],
+                )
+                Payroll.objects.bulk_create(
+                    Payroll(organisation=user.organisation, upload=upload, **values) for _, values in rows
+                )
+        except Exception:
+            # The rows were not saved, so the stored file must not linger as evidence of nothing.
+            file_storage.delete(stored["public_id"])
+            raise
         return upload, standardiser.ignored_columns

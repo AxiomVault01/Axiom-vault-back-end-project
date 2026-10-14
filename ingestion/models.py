@@ -16,6 +16,9 @@ class PayrollUpload(models.Model):
     )
     file_name = models.CharField(max_length=255)
     row_count = models.PositiveIntegerField()
+    # The original file, kept private on Cloudinary as evidence. Empty for uploads made before 7d.
+    source_public_id = models.CharField(max_length=255, blank=True, default="")
+    file_size = models.PositiveIntegerField(default=0, help_text="Size of the original file in bytes.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
