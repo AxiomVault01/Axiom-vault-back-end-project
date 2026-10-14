@@ -2118,7 +2118,8 @@ def test_staff_account_without_a_type_cannot_log_in_to_the_app(api_client, role)
 # ---- 30: Team member management ----
 
 TEAM_URL = "/api/v1/team/members/"
-FRAUD_RESULTS_URL = "/api/v1/fraud/results/"
+# Any protected endpoint works for the temporary-password block; permissions run before the body is read.
+PROTECTED_URL = "/api/v1/ingestion/upload-payroll/"
 TEMP_PASSWORD = "Temp-Ledger-2026!"
 SUPER_ADMIN_ONLY = {"error": "Only the super admin can manage the team."}
 PASSWORD_CHANGE_REQUIRED = {
@@ -2343,7 +2344,7 @@ def test_new_member_must_change_the_temporary_password_first(super_admin):
     assert login.json()["user"]["must_change_password"] is True
     client.credentials(HTTP_AUTHORIZATION="Bearer " + login.json()["access"])
 
-    blocked = client.get(FRAUD_RESULTS_URL)
+    blocked = client.post(PROTECTED_URL, {}, format="multipart")
     assert blocked.status_code == 403
     assert blocked.json() == PASSWORD_CHANGE_REQUIRED
 
@@ -2385,18 +2386,7 @@ def test_password_reset_also_clears_the_temporary_password_flag(super_admin):
 
 SOME_ID = "3f2a7c9e-1b4d-4e8a-9c2f-6d5e4b3a2c1d"
 PROTECTED_ROUTES = [
-    ("get", "/api/v1/fraud/"),
-    ("get", "/api/v1/fraud/results/"),
-    ("get", f"/api/v1/fraud/results/{SOME_ID}/"),
-    ("get", "/api/v1/fraud/results/flagged/"),
-    ("get", "/api/v1/fraud/alerts/"),
-    ("post", "/api/v1/fraud/alerts/"),
-    ("get", f"/api/v1/fraud/alerts/{SOME_ID}/"),
-    ("put", f"/api/v1/fraud/alerts/{SOME_ID}/"),
-    ("patch", f"/api/v1/fraud/alerts/{SOME_ID}/"),
-    ("delete", f"/api/v1/fraud/alerts/{SOME_ID}/"),
-    ("patch", f"/api/v1/fraud/alerts/{SOME_ID}/change_status/"),
-    ("get", f"/api/v1/fraud/alerts/{SOME_ID}/audit_logs/"),
+    ("get", "/api/v1/team/members/"),
     ("post", "/api/v1/ingestion/upload-payroll/"),
     ("post", "/api/v1/ingestion/upload-vendors/"),
     ("post", "/api/v1/ingestion/upload-payments/"),
@@ -2448,10 +2438,9 @@ def permission_outcome(view_class, user, action="list"):
 
 
 def protected_views():
-    from fraud.viewsets import AlertViewSet, FraudResultViewSet
     from ingestion.viewsets import IngestionViewSet
 
-    return [(FraudResultViewSet, "list"), (AlertViewSet, "list"), (IngestionViewSet, "upload_payroll")]
+    return [(IngestionViewSet, "upload_payroll"), (IngestionViewSet, "upload_payments")]
 
 
 @pytest.mark.django_db

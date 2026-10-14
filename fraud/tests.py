@@ -1,3 +1,290 @@
-from django.test import TestCase
+from datetime import date
+from decimal import Decimal
+from unittest.mock import patch
 
-# Create your tests here.
+import pytest
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken
+
+from accounts.models import AuditLog, Organisation
+from fraud.models import Alert
+from fraud.services.detection import create_alerts, duplicate_bank_accounts, duplicate_payments, run_detection
+from ingestion.models import DataUpload, Payment, Payroll, Vendor
+
+User = get_user_model()
+PAYROLL_URL = "/api/v1/ingestion/upload-payroll/"
+PAYMENTS_URL = "/api/v1/ingestion/upload-payments/"
+VENDORS_URL = "/api/v1/ingestion/upload-vendors/"
+
+
+@pytest.fixture
+def org(db):
+    return Organisation.objects.create(name="Ikeja Coop")
+
+
+def make_upload(organisation, kind):
+    return DataUpload.objects.create(organisation=organisation, kind=kind, file_name=f"{kind}.csv", row_count=0)
+
+
+def payroll(upload, employee_id, account="0123456789", period="2026-09", name=None, net="230000"):
+    return Payroll.objects.create(
+        organisation=upload.organisation, upload=upload, employee_id=employee_id,
+        employee_name=name or f"Employee {employee_id}", department="Operations", salary_basic=Decimal("250000"),
+        net_salary=Decimal(net), account_number=account, pay_period=period, payment_date=date(2026, 9, 28),
+    )
+
+
+def payment(upload, txn, vendor="VND-8847", invoice="INV-1", amount="42350", day=5, approver="John Doe"):
+    return Payment.objects.create(
+        organisation=upload.organisation, upload=upload, transaction_id=txn, vendor_id=vendor, invoice_number=invoice,
+        amount=Decimal(amount), payment_date=date(2026, 5, day), approver=approver, department="Procurement",
+    )
+
+
+# ---- 8b: duplicate bank account ----
+
+
+def test_shared_account_in_one_period_is_a_finding(org):
+    upload = make_upload(org, DataUpload.PAYROLL)
+    payroll(upload, "EMP002", name="Bola Ade")
+    payroll(upload, "EMP001", name="Ada Obi")
+    payroll(upload, "EMP003", account="0999999999")
+
+    [finding] = duplicate_bank_accounts(org, upload)
+
+    assert finding["severity"] == "high" and finding["risk_score"] == 85 == finding["confidence"]
+    assert finding["entity_type"] == "employee" and finding["entity_ref"] == "EMP001" and finding["entity_name"] == "Ada Obi"
+    assert [r["employee_id"] for r in finding["flagged_records"]] == ["EMP001", "EMP002"]
+    assert finding["flagged_records"][0]["net_salary"] == "230,000.00"
+    assert finding["fingerprint"] == "duplicate_bank_account:2026-09:0123456789"
+    assert "0123456789" in finding["explanation"] and "Ada Obi" in finding["explanation"]
+
+
+def test_three_employees_on_one_account_is_critical(org):
+    upload = make_upload(org, DataUpload.PAYROLL)
+    for emp in ("E1", "E2", "E3"):
+        payroll(upload, emp)
+
+    [finding] = duplicate_bank_accounts(org, upload)
+
+    assert finding["severity"] == "critical" and finding["risk_score"] == 95
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [("E1", "0123456789", "2026-09"), ("E2", "0999999999", "2026-09")],  # different accounts
+        [("E1", "0123456789", "2026-09"), ("E2", "0123456789", "2026-10")],  # different periods
+        [("E1", "0123456789", "2026-09"), ("E1", "0123456789", "2026-09")],  # same employee twice
+    ],
+)
+def test_no_finding_when_nothing_is_shared(org, rows):
+    upload = make_upload(org, DataUpload.PAYROLL)
+    for emp, account, period in rows:
+        payroll(upload, emp, account=account, period=period)
+
+    assert duplicate_bank_accounts(org, upload) == []
+
+
+def test_shared_account_across_two_uploads_is_found(org):
+    first = make_upload(org, DataUpload.PAYROLL)
+    payroll(first, "E1")
+    second = make_upload(org, DataUpload.PAYROLL)
+    payroll(second, "E2")
+
+    assert len(duplicate_bank_accounts(org, second)) == 1
+
+
+def test_other_organisations_rows_are_never_read(org):
+    other = Organisation.objects.create(name="Lekki Coop")
+    payroll(make_upload(other, DataUpload.PAYROLL), "E9")
+    upload = make_upload(org, DataUpload.PAYROLL)
+    payroll(upload, "E1")
+
+    assert duplicate_bank_accounts(org, upload) == []
+
+
+# ---- 8b: duplicate payment ----
+
+
+def test_invoice_paid_twice_is_a_finding_with_vendor_name(org):
+    vendors = make_upload(org, DataUpload.VENDORS)
+    Vendor.objects.create(organisation=org, upload=vendors, vendor_id="VND-8847", vendor_name="Acme Supplies", account_number="1")
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    payment(upload, "TXN-90455", day=8)
+    payment(upload, "TXN-90214", day=5)
+
+    [finding] = duplicate_payments(org, upload)
+
+    assert finding["severity"] == "high" and finding["risk_score"] == 90
+    assert finding["entity_type"] == "vendor" and finding["entity_name"] == "Acme Supplies" and finding["entity_ref"] == "VND-8847"
+    assert [r["transaction_id"] for r in finding["flagged_records"]] == ["TXN-90214", "TXN-90455"]
+    assert finding["flagged_records"][0] == {
+        "transaction_id": "TXN-90214", "payment_date": "2026-05-05", "amount": "42,350.00",
+        "invoice_number": "INV-1", "approver": "John Doe",
+    }
+    assert [e["label"] for e in finding["timeline"]] == ["Payment", "Payment", "Alert generated"]
+    assert "42,350.00 is more than the invoice should have cost" in finding["explanation"]
+
+
+def test_vendor_without_a_vendors_file_uses_its_id(org):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    payment(upload, "T1")
+    payment(upload, "T2")
+
+    assert duplicate_payments(org, upload)[0]["entity_name"] == "VND-8847"
+
+
+@pytest.mark.parametrize(
+    "amounts, expected",
+    [(["600000", "600000"], ("high", 90)), (["1000000", "1000000"], ("critical", 98)), (["10", "10", "10"], ("critical", 98))],
+)
+def test_duplicate_payment_severity(org, amounts, expected):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    for index, amount in enumerate(amounts):
+        payment(upload, f"T{index}", amount=amount)
+
+    finding = duplicate_payments(org, upload)[0]
+
+    assert (finding["severity"], finding["risk_score"]) == expected
+
+
+def test_different_invoices_or_vendors_are_not_duplicates(org):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    payment(upload, "T1", invoice="INV-1")
+    payment(upload, "T2", invoice="INV-2")
+    payment(upload, "T3", vendor="VND-1", invoice="INV-1")
+
+    assert duplicate_payments(org, upload) == []
+
+
+# ---- 8d: alerts ----
+
+
+def test_alerts_are_numbered_per_organisation_and_audited(org):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    for invoice in ("INV-1", "INV-2"):
+        payment(upload, f"{invoice}-a", invoice=invoice)
+        payment(upload, f"{invoice}-b", invoice=invoice)
+    other = Organisation.objects.create(name="Lekki Coop")
+    other_upload = make_upload(other, DataUpload.PAYMENTS)
+    payment(other_upload, "X1")
+    payment(other_upload, "X2")
+
+    alerts = run_detection(upload)
+    [other_alert] = run_detection(other_upload)
+
+    assert [a.reference for a in alerts] == ["ALT-0001", "ALT-0002"]
+    assert other_alert.reference == "ALT-0001"
+    alert = Alert.objects.get(organisation=org, number=1)
+    assert alert.status == "new" and alert.confidence_source == "derived" and alert.currency == "NGN"
+    assert alert.upload == upload and alert.ai_summary == "" and alert.ai_confidence is None
+    audit = AuditLog.objects.filter(action=AuditLog.ALERT_CREATED, organisation=org)
+    assert audit.count() == 2 and audit.first().actor is None
+    assert {a.details["reference"] for a in audit} == {"ALT-0001", "ALT-0002"}
+
+
+def test_the_same_finding_never_opens_twice(org):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    payment(upload, "T1")
+    payment(upload, "T2")
+    assert len(run_detection(upload)) == 1
+
+    again = make_upload(org, DataUpload.PAYMENTS)
+    payment(again, "T3")
+
+    assert run_detection(again) == []
+    assert Alert.objects.filter(organisation=org).count() == 1
+
+
+def test_numbering_continues_after_existing_alerts(org):
+    first = make_upload(org, DataUpload.PAYMENTS)
+    payment(first, "A1", invoice="INV-A")
+    payment(first, "A2", invoice="INV-A")
+    run_detection(first)
+    second = make_upload(org, DataUpload.PAYMENTS)
+    payment(second, "B1", invoice="INV-B")
+    payment(second, "B2", invoice="INV-B")
+
+    assert [a.reference for a in run_detection(second)] == ["ALT-0002"]
+
+
+def test_reference_grows_past_four_digits(org):
+    alert = create_alerts(org, [], None)
+    assert alert == []
+    assert Alert(number=12345).reference == "ALT-12345"
+
+
+# ---- 8c: run after upload ----
+
+
+@pytest.fixture
+def uploader(org):
+    return User.objects.create_user(
+        username="owner", email="owner@ikejacoop.ng", password="Str0ng-Passw0rd!", organisation=org,
+        account_type="super_admin", is_verified=True,
+    )
+
+
+def client_for(user):
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + str(AccessToken.for_user(user)))
+    return client
+
+
+def csv(name, header, rows):
+    text = "\n".join([header] + rows) + "\n"
+    return SimpleUploadedFile(name, text.encode("utf-8"))
+
+
+PAYROLL_HEADER = "employee_id,employee_name,department,salary_basic,net_salary,account_number,pay_period,payment_date"
+PAYMENTS_HEADER = "transaction_id,vendor_id,invoice_number,amount,payment_date"
+
+
+def test_payroll_upload_reports_new_alerts(uploader):
+    file = csv("p.csv", PAYROLL_HEADER, [
+        "E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28",
+        "E2,Bola,Ops,100,90,0123456789,2026-09,2026-09-28",
+    ])
+
+    body = client_for(uploader).post(PAYROLL_URL, {"file": file}, format="multipart").json()
+
+    assert body["detection"] == {"status": "completed", "alerts_created": 1, "alerts": ["ALT-0001"]}
+    assert Alert.objects.get().rule == Alert.DUPLICATE_BANK_ACCOUNT
+
+
+def test_payments_upload_reports_new_alerts(uploader):
+    file = csv("pay.csv", PAYMENTS_HEADER, ["T1,V1,INV-1,100,2026-05-05", "T2,V1,INV-1,100,2026-05-08"])
+
+    body = client_for(uploader).post(PAYMENTS_URL, {"file": file}, format="multipart").json()
+
+    assert body["detection"]["alerts"] == ["ALT-0001"]
+
+
+def test_clean_upload_reports_zero_alerts(uploader):
+    file = csv("p.csv", PAYROLL_HEADER, ["E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28"])
+
+    body = client_for(uploader).post(PAYROLL_URL, {"file": file}, format="multipart").json()
+
+    assert body["detection"] == {"status": "completed", "alerts_created": 0, "alerts": []}
+
+
+def test_vendors_upload_has_no_detection(uploader):
+    file = csv("v.csv", "vendor_id,vendor_name,account_number", ["V1,Acme,0123"])
+
+    body = client_for(uploader).post(VENDORS_URL, {"file": file}, format="multipart").json()
+
+    assert body["detection"] is None
+
+
+def test_detection_error_never_undoes_the_upload(uploader):
+    file = csv("pay.csv", PAYMENTS_HEADER, ["T1,V1,INV-1,100,2026-05-05", "T2,V1,INV-1,100,2026-05-08"])
+
+    with patch("ingestion.viewsets.run_detection", side_effect=RuntimeError("rule crashed")):
+        response = client_for(uploader).post(PAYMENTS_URL, {"file": file}, format="multipart")
+
+    assert response.status_code == 201
+    assert response.json()["detection"] == {"status": "failed", "alerts_created": 0, "alerts": []}
+    assert Payment.objects.count() == 2 and Alert.objects.count() == 0
