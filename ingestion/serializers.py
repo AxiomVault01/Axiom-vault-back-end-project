@@ -9,8 +9,8 @@ class PayrollSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at"]
 
-class PayrollUploadSerializer(serializers.Serializer):
+class FileUploadSerializer(serializers.Serializer):
     file = serializers.FileField(
-        help_text="The payroll file: .csv or .xlsx, at most 10 MB.",
-        label="Payroll file"
+        help_text="The file: .csv or .xlsx, at most 10 MB.",
+        label="File"
     )

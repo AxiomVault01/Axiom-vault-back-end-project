@@ -2398,6 +2398,8 @@ PROTECTED_ROUTES = [
     ("patch", f"/api/v1/fraud/alerts/{SOME_ID}/change_status/"),
     ("get", f"/api/v1/fraud/alerts/{SOME_ID}/audit_logs/"),
     ("post", "/api/v1/ingestion/upload-payroll/"),
+    ("post", "/api/v1/ingestion/upload-vendors/"),
+    ("post", "/api/v1/ingestion/upload-payments/"),
 ]
 
 
