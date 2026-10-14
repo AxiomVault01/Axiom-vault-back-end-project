@@ -1,57 +1,22 @@
 class ValidationService:
+    """Checks that look across rows. Single-value rules live in the standardiser."""
 
-    REQUIRED_FIELDS = [
-        "employee_id",
-        "employee_name",
-        "department",
-        "salary_basic",
-        "net_salary",
-        "account_number",
-        "pay_period",
-        "payment_date",
-    ]
+    DUPLICATE_MESSAGE = "Duplicate payroll record: same employee, account number, and pay period as row {first}."
 
     @staticmethod
-    def validate(rows):
-        errors = []
-        seen = set()
-
-        for index, row in enumerate(rows):
-
-            # ❌ Missing fields
-            for field in ValidationService.REQUIRED_FIELDS:
-                if field not in row or row[field] in [None, ""]:
-                    errors.append({
-                        "row": index,
-                        "error": f"{field} is missing"
-                    })
-
-            # ❌ Duplicate detection
-            key = (
-                row.get("employee_id"),
-                row.get("account_number"),
-                row.get("pay_period"),
-            )
-
-            if key in seen:
+    def duplicates(rows: list[tuple[int, dict]]) -> list[dict]:
+        """`rows` is (spreadsheet row number, typed values). Reports every repeat after the first."""
+        errors, first_seen = [], {}
+        for row_number, values in rows:
+            key = (values.get("employee_id"), values.get("account_number"), values.get("pay_period"))
+            if None in key:
+                continue  # A missing part is already reported as its own error.
+            if key in first_seen:
                 errors.append({
-                    "row": index,
-                    "error": "Duplicate payroll record"
+                    "row": row_number,
+                    "field": "employee_id",
+                    "error": ValidationService.DUPLICATE_MESSAGE.format(first=first_seen[key]),
                 })
             else:
-                seen.add(key)
-
-            # ❌ Logical validation
-            try:
-                if float(row.get("net_salary", 0)) < 0:
-                    errors.append({
-                        "row": index,
-                        "error": "Net salary cannot be negative"
-                    })
-            except:
-                errors.append({
-                    "row": index,
-                    "error": "Invalid salary format"
-                })
-
+                first_seen[key] = row_number
         return errors

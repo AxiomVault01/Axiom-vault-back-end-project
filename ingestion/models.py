@@ -1,9 +1,36 @@
 import uuid
+
+from django.conf import settings
 from django.db import models
+
+from accounts.models import Organisation
+
+
+class PayrollUpload(models.Model):
+    """One accepted payroll file: who sent it, for which organisation, and how many rows it held."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organisation = models.ForeignKey(Organisation, on_delete=models.PROTECT, related_name="payroll_uploads")
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    file_name = models.CharField(max_length=255)
+    row_count = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "payroll_uploads"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.file_name} ({self.row_count} rows)"
 
 
 class Payroll(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Every row belongs to one organisation and the upload it came from.
+    organisation = models.ForeignKey(Organisation, on_delete=models.PROTECT, related_name="payroll_rows")
+    upload = models.ForeignKey(PayrollUpload, on_delete=models.PROTECT, related_name="rows")
 
     # ✅ CORE
     employee_id = models.CharField(max_length=100)
@@ -43,12 +70,3 @@ class Payroll(models.Model):
 
     def __str__(self):
         return f"{self.employee_name} - {self.pay_period}"
-
-class BankAccount(models.Model):
-    # add your fields here
-    account_number = models.CharField(max_length=20)
-    bank_name = models.CharField(max_length=100)
-    # ... other fields
-
-    def __str__(self):
-        return self.account_number

@@ -2397,8 +2397,7 @@ PROTECTED_ROUTES = [
     ("delete", f"/api/v1/fraud/alerts/{SOME_ID}/"),
     ("patch", f"/api/v1/fraud/alerts/{SOME_ID}/change_status/"),
     ("get", f"/api/v1/fraud/alerts/{SOME_ID}/audit_logs/"),
-    ("get", "/api/v1/ingestion/"),
-    ("post", "/api/v1/ingestion/ingestion/upload-payroll/"),
+    ("post", "/api/v1/ingestion/upload-payroll/"),
 ]
 
 
