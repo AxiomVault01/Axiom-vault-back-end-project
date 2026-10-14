@@ -541,7 +541,7 @@ def test_payments_upload_allows_the_same_invoice_twice(uploader):
     assert response.json()["upload"]["kind"] == "payments"
     assert list(Payment.objects.values_list("invoice_number", flat=True)) == ["INV-2024-8847", "INV-2024-8847"]
     assert Payment.objects.get(transaction_id="TXN-90214").amount == Decimal("42350.00")
-    assert AuditLog.objects.get().action == AuditLog.PAYMENTS_UPLOADED
+    assert AuditLog.objects.filter(action=AuditLog.PAYMENTS_UPLOADED).count() == 1
 
 
 def test_bad_payments_file_saves_nothing(uploader):

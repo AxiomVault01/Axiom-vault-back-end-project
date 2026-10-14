@@ -1,3 +1,5 @@
+import logging
+
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers, status, viewsets
@@ -8,11 +10,14 @@ from rest_framework.response import Response
 from accounts.models import AuditLog
 from accounts.permissions import PASSWORD_CHANGE_REQUIRED_MESSAGE, PasswordChangeNotRequired
 from config.file_storage import StorageUnavailable
+from fraud.services.detection import RULES, run_detection
 
 from .models import Payment, Payroll, Vendor
 from .serializers import FileUploadSerializer
 from .services.ingestion_service import MAX_ERRORS_SHOWN, MAX_ROWS, ROWS_INVALID_MESSAGE, IngestionService, UploadRejected
 from .services.standardiser import PAYMENT_SCHEMA, PAYROLL_SCHEMA, VENDOR_SCHEMA
+
+logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 FILE_TOO_LARGE_MESSAGE = "The file is larger than 10 MB."
@@ -72,6 +77,21 @@ def _response_schema(kind_label):
                 child=serializers.CharField(),
                 help_text="Column names in the file that are not fields of this kind. They were not saved.",
             ),
+            "detection": inline_serializer(
+                f"{kind_label.title()}DetectionSummary",
+                {
+                    "status": serializers.ChoiceField(
+                        choices=["completed", "failed"],
+                        help_text="`completed`, or `failed` when detection hit an error (the upload is still saved).",
+                    ),
+                    "alerts_created": serializers.IntegerField(help_text="How many new alerts this upload opened."),
+                    "alerts": serializers.ListField(
+                        child=serializers.CharField(), help_text="References of the new alerts, e.g. `ALT-0007`."
+                    ),
+                },
+                allow_null=True,
+                help_text="Fraud detection run on this upload. `null` for vendors files, which feed later rules.",
+            ),
         },
     )
 
@@ -97,7 +117,9 @@ def upload_docs(schema, label, screen_note, example_errors, duplicate_note, save
             "- Text is trimmed. A completely blank row is skipped.\n"
             f"- {duplicate_note}\n\n"
             "**Responses**\n"
-            "- `201`: saved. Show `row_count`, and warn about `ignored_columns` if it is not empty.\n"
+            "- `201`: saved. Show `row_count`, and warn about `ignored_columns` if it is not empty. "
+            "`detection` says how many alerts the upload opened (link to the Alerts screen); it is `null` when "
+            "this file kind has no rules yet. A detection error never undoes the upload.\n"
             f"- `400`: nothing was saved. Either a file problem (`error`, and `missing_columns` when required "
             f"columns are absent), or row problems: `validation_errors` lists the first {MAX_ERRORS_SHOWN} "
             "(`row` is the spreadsheet row number, the header being row 1) and `error_count` is the total.\n"
@@ -165,7 +187,7 @@ def upload_docs(schema, label, screen_note, example_errors, duplicate_note, save
     )
 
 
-def _saved(kind, name, rows, size, ignored):
+def _saved(kind, name, rows, size, ignored, detection):
     return {
         "upload": {
             "id": "9b2f6c1e-4d3a-4f7b-8e2d-1a5c7b9e0f3d",
@@ -176,6 +198,7 @@ def _saved(kind, name, rows, size, ignored):
             "created_at": "2026-10-14T10:15:00Z",
         },
         "ignored_columns": ignored,
+        "detection": detection,
     }
 
 
@@ -215,9 +238,22 @@ class IngestionViewSet(viewsets.ViewSet):
                     "created_at": upload.created_at,
                 },
                 "ignored_columns": ignored_columns,
+                "detection": self._detect(upload),
             },
             status=status.HTTP_201_CREATED,
         )
+
+    @staticmethod
+    def _detect(upload):
+        """Runs fraud detection on a saved upload. An error is reported, never undoing the upload."""
+        if upload.kind not in RULES:
+            return None
+        try:
+            alerts = run_detection(upload)
+        except Exception:
+            logger.exception("Fraud detection failed for upload %s", upload.id)
+            return {"status": "failed", "alerts_created": 0, "alerts": []}
+        return {"status": "completed", "alerts_created": len(alerts), "alerts": [a.reference for a in alerts]}
 
     @upload_docs(
         PAYROLL_SCHEMA,
@@ -228,7 +264,8 @@ class IngestionViewSet(viewsets.ViewSet):
             {"row": 9, "field": "payment_date", "error": "Use a date like 2026-09-28 or 28/09/2026."},
         ],
         "The same employee, account number, and pay period twice in one file is an error.",
-        _saved("payroll", "september-payroll.xlsx", 248, 48213, ["Remarks"]),
+        _saved("payroll", "september-payroll.xlsx", 248, 48213, ["Remarks"],
+               {"status": "completed", "alerts_created": 1, "alerts": ["ALT-0007"]}),
     )
     def upload_payroll(self, request):
         return self._upload(request, PAYROLL_SCHEMA, Payroll, AuditLog.PAYROLL_UPLOADED)
@@ -242,7 +279,7 @@ class IngestionViewSet(viewsets.ViewSet):
             {"row": 7, "field": "email", "error": "Enter a valid email address."},
         ],
         "The same `vendor_id` twice in one file is an error.",
-        _saved("vendors", "vendors-october.csv", 64, 9120, []),
+        _saved("vendors", "vendors-october.csv", 64, 9120, [], None),
     )
     def upload_vendors(self, request):
         return self._upload(request, VENDOR_SCHEMA, Vendor, AuditLog.VENDORS_UPLOADED)
@@ -257,7 +294,8 @@ class IngestionViewSet(viewsets.ViewSet):
         ],
         "The same `transaction_id` twice in one file is an error. The same invoice paid twice is **not** "
         "an error here: it is what fraud detection looks for.",
-        _saved("payments", "payments-october.xlsx", 512, 61440, ["Remarks"]),
+        _saved("payments", "payments-october.xlsx", 512, 61440, ["Remarks"],
+               {"status": "completed", "alerts_created": 2, "alerts": ["ALT-0008", "ALT-0009"]}),
     )
     def upload_payments(self, request):
         return self._upload(request, PAYMENT_SCHEMA, Payment, AuditLog.PAYMENTS_UPLOADED)

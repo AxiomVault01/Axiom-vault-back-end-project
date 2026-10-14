@@ -164,6 +164,7 @@ class AuditLog(models.Model):
     PAYROLL_UPLOADED = "payroll_uploaded"
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
+    ALERT_CREATED = "alert_created"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -177,6 +178,7 @@ class AuditLog(models.Model):
         (PAYROLL_UPLOADED, "Uploaded a payroll file"),
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
+        (ALERT_CREATED, "Detection opened an alert"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -213,9 +215,12 @@ class AuditLog(models.Model):
         raise PermissionDenied("Audit log rows cannot be deleted.")
 
     @classmethod
-    def record(cls, action, actor=None, target=None, details=None, request=None):
-        """Writes one row. The organisation is the actor's; never put passwords or tokens in details."""
-        organisation = getattr(actor, "organisation", None)
+    def record(cls, action, actor=None, target=None, details=None, request=None, organisation=None):
+        """Writes one row. The organisation is the actor's unless given (system actions have no actor).
+
+        Never put passwords or tokens in details.
+        """
+        organisation = organisation or getattr(actor, "organisation", None)
         ip = client_ip(request.META) if request is not None else None
         return cls.objects.create(
             action=action,
