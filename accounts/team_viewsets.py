@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import User
+from .models import AuditLog, User
 from .permissions import (
     PASSWORD_CHANGE_REQUIRED_MESSAGE,
     SUPER_ADMIN_ONLY_MESSAGE,
@@ -174,6 +174,9 @@ class TeamMemberViewSet(viewsets.GenericViewSet):
         serializer = TeamMemberCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         member = TeamService.add_member(request.user, serializer.validated_data)
+        AuditLog.record(
+            AuditLog.TEAM_MEMBER_ADDED, actor=request.user, target=member, details={"email": member.email}, request=request
+        )
         return Response(TeamMemberSerializer(member).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
@@ -213,7 +216,11 @@ class TeamMemberViewSet(viewsets.GenericViewSet):
         member = self.get_object()
         serializer = TeamMemberUpdateSerializer(data=request.data, context={"member": member})
         serializer.is_valid(raise_exception=True)
-        member = TeamService.update_member(member, dict(serializer.validated_data))
+        changed = dict(serializer.validated_data)
+        member = TeamService.update_member(member, changed)
+        AuditLog.record(
+            AuditLog.TEAM_MEMBER_UPDATED, actor=request.user, target=member, details={"fields": sorted(changed)}, request=request
+        )
         return Response(TeamMemberSerializer(member).data)
 
     @extend_schema(
@@ -229,7 +236,9 @@ class TeamMemberViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=["post"])
     def deactivate(self, request, pk=None):
-        return Response(TeamMemberSerializer(TeamService.set_active(self.get_object(), False)).data)
+        member = TeamService.set_active(self.get_object(), False)
+        AuditLog.record(AuditLog.TEAM_MEMBER_DEACTIVATED, actor=request.user, target=member, request=request)
+        return Response(TeamMemberSerializer(member).data)
 
     @extend_schema(
         tags=["Team"],
@@ -243,4 +252,6 @@ class TeamMemberViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=["post"])
     def reactivate(self, request, pk=None):
-        return Response(TeamMemberSerializer(TeamService.set_active(self.get_object(), True)).data)
+        member = TeamService.set_active(self.get_object(), True)
+        AuditLog.record(AuditLog.TEAM_MEMBER_REACTIVATED, actor=request.user, target=member, request=request)
+        return Response(TeamMemberSerializer(member).data)

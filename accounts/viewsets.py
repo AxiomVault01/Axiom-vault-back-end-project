@@ -53,6 +53,7 @@ from .serializers import (
 )
 from django.conf import settings
 from .device import device_info
+from .models import AuditLog, User
 from .throttling import CHANGE_PASSWORD_ATTEMPTS, CHANGE_PASSWORD_WINDOW_SECONDS, ChangePasswordRateThrottle
 
 SEND_OTP_SUCCESS_MESSAGE = "OTP verification code transmitted successfully."
@@ -447,6 +448,7 @@ class AuthViewSet(viewsets.ViewSet):
         serializer.is_valid(raise_exception=True)
 
         user = AuthService.signup(serializer.validated_data)
+        AuditLog.record(AuditLog.SIGNUP, actor=user, target=user, request=request)
         return Response(
             {"message": SIGNUP_SUCCESS_MESSAGE, "email": user.email},
             status=status.HTTP_201_CREATED,
@@ -568,6 +570,8 @@ class AuthViewSet(viewsets.ViewSet):
             password=serializer.validated_data["password"],
             role=serializer.validated_data["role"],
         )
+        user = User.objects.get(pk=result["user"]["id"])
+        AuditLog.record(AuditLog.LOGIN, actor=user, details={"role": user.account_type}, request=request)
         return Response(result, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -837,11 +841,12 @@ class AuthViewSet(viewsets.ViewSet):
         serializer = ResetPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        AuthService.reset_password(
+        user = AuthService.reset_password(
             serializer.validated_data["reset_token"],
             serializer.validated_data["new_password"],
             device_info(request),
         )
+        AuditLog.record(AuditLog.PASSWORD_RESET, actor=user, request=request)
         return Response({"message": PASSWORD_RESET_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -929,6 +934,7 @@ class AuthViewSet(viewsets.ViewSet):
         serializer.is_valid(raise_exception=True)
 
         AuthService.logout(request.user, serializer.validated_data["refresh"])
+        AuditLog.record(AuditLog.LOGOUT, actor=request.user, request=request)
         return Response({"message": LOGOUT_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -1032,4 +1038,5 @@ class AuthViewSet(viewsets.ViewSet):
             serializer.validated_data["new_password"],
             device_info(request),
         )
+        AuditLog.record(AuditLog.PASSWORD_CHANGED, actor=request.user, request=request)
         return Response(result, status=status.HTTP_200_OK)

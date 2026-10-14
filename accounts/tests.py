@@ -2498,3 +2498,128 @@ def test_public_auth_endpoints_ignore_the_login_requirement(api_client):
     assert login.status_code == 200
     assert refreshed.status_code == 200
     assert forgot.status_code == 200
+
+
+# ---- 14: Audit log foundation ----
+
+from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+
+from accounts.models import AuditLog
+
+CLIENT_IP = "203.0.113.7"
+
+
+def ip_client():
+    return APIClient(REMOTE_ADDR=CLIENT_IP)
+
+
+def only_row(action):
+    rows = list(AuditLog.objects.filter(action=action))
+    assert len(rows) == 1, [r.action for r in AuditLog.objects.all()]
+    return rows[0]
+
+
+@pytest.mark.django_db
+def test_record_writes_one_row_with_snapshots():
+    user = create_user("ada@ikejacoop.ng", organisation_name="Ikeja Coop")
+
+    row = AuditLog.record(AuditLog.LOGIN, actor=user, target=user, details={"role": "super_admin"})
+
+    assert row.actor == user and row.actor_email == "ada@ikejacoop.ng"
+    assert row.organisation == user.organisation and row.organisation_name == "Ikeja Coop"
+    assert row.target_type == "user" and row.target_id == str(user.pk)
+    assert row.details == {"role": "super_admin"}
+    assert row.ip_address is None
+
+
+@pytest.mark.django_db
+def test_audit_rows_cannot_be_changed_or_deleted():
+    row = AuditLog.record(AuditLog.LOGIN, actor=create_user())
+
+    row.details = {"edited": True}
+    with pytest.raises(DjangoPermissionDenied):
+        row.save()
+    with pytest.raises(DjangoPermissionDenied):
+        row.delete()
+    with pytest.raises(DjangoPermissionDenied):
+        AuditLog.objects.filter(pk=row.pk).update(action=AuditLog.LOGOUT)
+    with pytest.raises(DjangoPermissionDenied):
+        AuditLog.objects.all().delete()
+    assert AuditLog.objects.get(pk=row.pk).details == {}
+
+
+@pytest.mark.django_db
+def test_rows_survive_deleting_the_user_and_organisation():
+    user = create_user("ada@ikejacoop.ng", organisation_name="Ikeja Coop")
+    organisation = user.organisation
+    row = AuditLog.record(AuditLog.LOGIN, actor=user)
+
+    user.delete()
+    organisation.delete()
+
+    row = AuditLog.objects.get(pk=row.pk)
+    assert row.actor is None and row.organisation is None
+    assert row.actor_email == "ada@ikejacoop.ng" and row.organisation_name == "Ikeja Coop"
+
+
+@pytest.mark.django_db
+def test_signup_and_login_are_recorded_with_the_ip():
+    client = ip_client()
+    client.post(SIGNUP_URL, signup_data(organization="Ikeja Coop"), format="json")
+    client.post(LOGIN_URL, {"email": "juan.cruz@agency.gov", "password": GOOD_PASSWORD, "role": "super_admin"}, format="json")
+
+    user = User.objects.get(email="juan.cruz@agency.gov")
+    signup = only_row(AuditLog.SIGNUP)
+    login = only_row(AuditLog.LOGIN)
+    assert signup.actor == user and signup.target_id == str(user.pk) and signup.ip_address == CLIENT_IP
+    assert login.actor == user and login.organisation_name == "Ikeja Coop"
+    assert login.details == {"role": "super_admin"} and login.ip_address == CLIENT_IP
+
+
+@pytest.mark.django_db
+def test_logout_and_password_changes_are_recorded():
+    user = create_user("ada@example.com")
+    client = ip_client()
+    tokens = client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Str0ng-Passw0rd!", "role": "super_admin"}, format="json").json()
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + tokens["access"])
+
+    client.post(CHANGE_URL, {"current_password": "Str0ng-Passw0rd!", "new_password": "Own-Ledger-2026!", "re_enter_password": "Own-Ledger-2026!"}, format="json")
+    fresh = client.post(LOGIN_URL, {"email": "ada@example.com", "password": "Own-Ledger-2026!", "role": "super_admin"}, format="json").json()
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + fresh["access"])
+    client.post(LOGOUT_URL, {"refresh": fresh["refresh"]}, format="json")
+    user.refresh_from_db()  # The reset token depends on the current password hash.
+    client.post(RESET_URL, {"reset_token": PasswordResetToken.issue(user), "new_password": "Reset-Ledger-2026!", "re_enter_password": "Reset-Ledger-2026!"}, format="json")
+
+    assert only_row(AuditLog.PASSWORD_CHANGED).actor == user
+    assert only_row(AuditLog.LOGOUT).actor == user
+    assert only_row(AuditLog.PASSWORD_RESET).actor == user
+
+
+@pytest.mark.django_db
+def test_team_actions_are_recorded_against_the_member(super_admin):
+    member = add_member(super_admin)
+    client = bearer(ip_client(), super_admin)
+
+    client.patch(member_url(member.id), {"role": "Lead Analyst", "phone_number": "08012345678"}, format="json")
+    client.post(member_url(member.id, "deactivate"))
+    client.post(member_url(member.id, "reactivate"))
+
+    added = only_row(AuditLog.TEAM_MEMBER_ADDED)
+    assert added.actor == super_admin and added.target_id == str(member.pk)
+    assert added.organisation == super_admin.organisation and added.details == {"email": member.email}
+    updated = only_row(AuditLog.TEAM_MEMBER_UPDATED)
+    assert updated.details == {"fields": ["phone_number", "role"]} and updated.ip_address == CLIENT_IP
+    assert only_row(AuditLog.TEAM_MEMBER_DEACTIVATED).target_id == str(member.pk)
+    assert only_row(AuditLog.TEAM_MEMBER_REACTIVATED).target_id == str(member.pk)
+
+
+@pytest.mark.django_db
+def test_failed_actions_write_nothing(super_admin):
+    client = APIClient()
+    client.post(LOGIN_URL, {"email": "owner@ikejacoop.ng", "password": "wrong-wrong-1", "role": "super_admin"}, format="json")
+    client.post(LOGIN_URL, {"email": "owner@ikejacoop.ng", "password": "Str0ng-Passw0rd!", "role": "team_member"}, format="json")
+    client.post(SIGNUP_URL, signup_data(password="short", re_enter_password="short"), format="json")
+    bearer(client, super_admin).post(TEAM_URL, new_member_data(phone_number="12"), format="json")
+    client.post(member_url(SOME_ID, "deactivate"))
+
+    assert AuditLog.objects.count() == 0
