@@ -162,6 +162,8 @@ class AuditLog(models.Model):
     TEAM_MEMBER_DEACTIVATED = "team_member_deactivated"
     TEAM_MEMBER_REACTIVATED = "team_member_reactivated"
     PAYROLL_UPLOADED = "payroll_uploaded"
+    VENDORS_UPLOADED = "vendors_uploaded"
+    PAYMENTS_UPLOADED = "payments_uploaded"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -173,6 +175,8 @@ class AuditLog(models.Model):
         (TEAM_MEMBER_DEACTIVATED, "Deactivated a team member"),
         (TEAM_MEMBER_REACTIVATED, "Reactivated a team member"),
         (PAYROLL_UPLOADED, "Uploaded a payroll file"),
+        (VENDORS_UPLOADED, "Uploaded a vendors file"),
+        (PAYMENTS_UPLOADED, "Uploaded a payments file"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

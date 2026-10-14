@@ -11,9 +11,9 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
 from accounts.models import AuditLog, Organisation
-from ingestion.models import Payroll, PayrollUpload
+from ingestion.models import DataUpload, Payment, Payroll, Vendor
 from ingestion.services.file_parser import FileError, FileParser
-from ingestion.services.standardiser import PayrollStandardiser
+from ingestion.services.standardiser import PAYMENT_SCHEMA, PAYROLL_SCHEMA, VENDOR_SCHEMA, Standardiser
 from ingestion.services.validation_service import ValidationService
 # Imported before the autouse fake replaces them, so the helper itself can be tested.
 from config.file_storage import StorageUnavailable, delete as real_delete, store_private as real_store_private
@@ -44,7 +44,7 @@ def xlsx_file(rows, headers=HEADERS, name="payroll.xlsx"):
 
 
 def standardise(rows, headers=HEADERS):
-    standardiser = PayrollStandardiser(headers)
+    standardiser = Standardiser(PAYROLL_SCHEMA, headers)
     return standardiser, [standardiser.row(row) for row in rows]
 
 
@@ -96,7 +96,8 @@ def test_empty_or_broken_files_are_refused():
 
 
 def test_aliases_and_letter_case_map_to_standard_fields():
-    standardiser = PayrollStandardiser(
+    standardiser = Standardiser(
+        PAYROLL_SCHEMA,
         ["Staff ID", "Full Name", "DEPT", "Basic Salary", "Net-Pay", "Account No", "Period", "Pay Date", "Remarks", "Branch"]
     )
 
@@ -107,7 +108,7 @@ def test_aliases_and_letter_case_map_to_standard_fields():
 
 
 def test_missing_required_columns_are_listed():
-    standardiser = PayrollStandardiser(["employee_id", "employee_name"])
+    standardiser = Standardiser(PAYROLL_SCHEMA, ["employee_id", "employee_name"])
 
     assert standardiser.missing_columns == HEADERS[2:]
 
@@ -190,9 +191,9 @@ def test_duplicates_report_the_first_row():
     ]
     rows[1] = (3, rows[1][1])
 
-    errors = ValidationService.duplicates(rows)
+    errors = ValidationService.duplicates(rows, PAYROLL_SCHEMA.duplicate_key, PAYROLL_SCHEMA.duplicate_message)
 
-    assert errors == [{"row": 3, "field": "employee_id", "error": ValidationService.DUPLICATE_MESSAGE.format(first=2)}]
+    assert errors == [{"row": 3, "field": "employee_id", "error": PAYROLL_SCHEMA.duplicate_message.format(first=2)}]
 
 
 # ---- 7b: the upload endpoint ----
@@ -223,13 +224,13 @@ def test_csv_upload_saves_every_row_for_the_organisation(uploader):
     body = response.json()
     assert body["upload"]["row_count"] == 2 and body["upload"]["file_name"] == "payroll.csv"
     assert body["ignored_columns"] == []
-    upload = PayrollUpload.objects.get()
+    upload = DataUpload.objects.get()
     assert upload.organisation == uploader.organisation and upload.uploaded_by == uploader
     assert list(Payroll.objects.values_list("employee_id", flat=True).order_by("employee_id")) == ["EMP001", "EMP002"]
     assert set(Payroll.objects.values_list("organisation", "upload")) == {(uploader.organisation_id, upload.id)}
     assert Payroll.objects.get(employee_id="EMP001").account_number == "0123456789"
     audit = AuditLog.objects.get(action=AuditLog.PAYROLL_UPLOADED)
-    assert audit.actor == uploader and audit.target_type == "payrollupload" and audit.target_id == str(upload.id)
+    assert audit.actor == uploader and audit.target_type == "dataupload" and audit.target_id == str(upload.id)
     assert audit.details == {"file_name": "payroll.csv", "row_count": 2}
 
 
@@ -257,7 +258,7 @@ def test_one_bad_row_saves_nothing(uploader):
     assert body["error_count"] == 2
     assert body["validation_errors"][0] == {"row": 3, "field": "net_salary", "error": "The amount cannot be negative."}
     assert body["validation_errors"][1]["row"] == 4
-    assert PayrollUpload.objects.count() == 0 and Payroll.objects.count() == 0
+    assert DataUpload.objects.count() == 0 and Payroll.objects.count() == 0
     assert not AuditLog.objects.filter(action=AuditLog.PAYROLL_UPLOADED).exists()
 
 
@@ -273,7 +274,7 @@ def test_only_the_first_hundred_errors_are_returned(uploader):
     "file, error_start",
     [
         (lambda: csv_file([GOOD_ROW], headers=["employee_id", "employee_name"]), "Some required columns are missing"),
-        (lambda: csv_file([]), "The file has no payroll rows"),
+        (lambda: csv_file([]), "The file has no rows"),
         (lambda: SimpleUploadedFile("p.txt", b"hello"), "Upload a .csv or .xlsx file."),
     ],
 )
@@ -329,7 +330,7 @@ def test_account_without_an_organisation_cannot_upload(db):
     response = client_for(staff).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert response.status_code == 403
-    assert response.json() == {"error": "Only organisation accounts can upload payroll."}
+    assert response.json() == {"error": "Only organisation accounts can upload files."}
 
 
 def test_team_member_may_upload_but_not_on_a_temporary_password(uploader):
@@ -402,7 +403,7 @@ def test_upload_keeps_the_exact_original_file(uploader, fake_storage):
 
     body = client_for(uploader).post(UPLOAD_URL, {"file": sent}, format="multipart").json()
 
-    upload = PayrollUpload.objects.get()
+    upload = DataUpload.objects.get()
     expected_id = f"axiomvault/{uploader.organisation_id}/payroll/{upload.id}.csv"
     assert upload.source_public_id == expected_id
     assert fake_storage.files[expected_id] == raw
@@ -433,7 +434,7 @@ def test_storage_failure_gives_503_and_saves_nothing(uploader, monkeypatch):
     assert response.json() == {
         "error": "The file could not be stored right now. Nothing was saved. Try again in a few minutes."
     }
-    assert PayrollUpload.objects.count() == 0 and Payroll.objects.count() == 0
+    assert DataUpload.objects.count() == 0 and Payroll.objects.count() == 0
 
 
 def test_a_database_failure_after_storing_removes_the_stored_file(uploader, fake_storage):
@@ -441,11 +442,11 @@ def test_a_database_failure_after_storing_removes_the_stored_file(uploader, fake
 
     with patch("ingestion.models.Payroll.objects.bulk_create", side_effect=RuntimeError("db down")):
         with pytest.raises(RuntimeError):
-            IngestionService.upload_payroll(csv_file([GOOD_ROW]), uploader)
+            IngestionService.upload(csv_file([GOOD_ROW]), uploader, PAYROLL_SCHEMA, Payroll)
 
     assert fake_storage.files == {}
     assert len(fake_storage.deleted) == 1
-    assert PayrollUpload.objects.count() == 0
+    assert DataUpload.objects.count() == 0
 
 
 def test_a_malformed_cloudinary_url_gives_storage_unavailable(monkeypatch):
@@ -453,3 +454,118 @@ def test_a_malformed_cloudinary_url_gives_storage_unavailable(monkeypatch):
     with patch("cloudinary.uploader.upload", side_effect=ValueError("Invalid CLOUDINARY_URL scheme")):
         with pytest.raises(StorageUnavailable):
             real_store_private(b"hello", "x")
+
+
+# ---- 7e: vendor and payment uploads ----
+
+VENDORS_URL = "/api/v1/ingestion/upload-vendors/"
+PAYMENTS_URL = "/api/v1/ingestion/upload-payments/"
+VENDOR_HEADERS = ["vendor_id", "vendor_name", "account_number", "bank_name", "registration_number", "address", "phone", "email", "date_registered"]
+VENDOR_ROW = ["VND-8847", "Acme Supplies", "0012345678", "GTBank", "RC-123456", "12 Allen Ave, Ikeja", "+234 803-000-1111", "Accounts@Acme.ng", "15/01/2024"]
+PAYMENT_HEADERS = ["transaction_id", "vendor_id", "invoice_number", "amount", "payment_date", "approver", "cost_centre", "department", "description"]
+PAYMENT_ROW = ["TXN-90214", "VND-8847", "INV-2024-8847", "₦42,350.00", "2026-05-05", "John Doe", "CC-01", "Procurement", "Office supplies"]
+
+
+def test_vendor_schema_aliases_and_values():
+    standardiser = Standardiser(VENDOR_SCHEMA, ["Supplier ID", "Supplier Name", "Account No", "RC Number", "Email Address", "Notes"])
+
+    assert standardiser.missing_columns == []
+    assert standardiser.ignored_columns == ["Notes"]
+    values, errors = Standardiser(VENDOR_SCHEMA, VENDOR_HEADERS).row(VENDOR_ROW)
+    assert errors == []
+    assert values["phone"] == "+2348030001111" and values["email"] == "accounts@acme.ng"
+    assert values["account_number"] == "0012345678" and values["date_registered"] == date(2024, 1, 15)
+
+
+def test_vendor_optional_contact_fields_may_be_blank_but_must_be_valid():
+    blank = list(VENDOR_ROW[:3]) + ["", "", "", "", "", ""]
+    bad = list(VENDOR_ROW)
+    bad[6], bad[7], bad[8] = "12", "not-an-email", "31/31/2024"
+
+    blank_values, blank_errors = Standardiser(VENDOR_SCHEMA, VENDOR_HEADERS).row(blank)
+    _, bad_errors = Standardiser(VENDOR_SCHEMA, VENDOR_HEADERS).row(bad)
+
+    assert blank_errors == [] and blank_values["email"] == "" and blank_values["date_registered"] is None
+    assert sorted(f for f, _ in bad_errors) == ["date_registered", "email", "phone"]
+
+
+def test_vendor_and_payment_required_columns():
+    assert Standardiser(VENDOR_SCHEMA, ["vendor_name"]).missing_columns == ["vendor_id", "account_number"]
+    assert Standardiser(PAYMENT_SCHEMA, ["amount"]).missing_columns == ["transaction_id", "vendor_id", "invoice_number", "payment_date"]
+
+
+def test_payment_schema_values():
+    standardiser = Standardiser(PAYMENT_SCHEMA, ["Txn ID", "Vendor Code", "Invoice No", "Amount Paid", "Date Paid", "Approved By", "Cost Center", "Narration"])
+    values, errors = standardiser.row(["TXN-1", "VND-1", "INV-1", "1,000", "28/09/2026", "Ada", "CC-9", "Fuel"])
+
+    assert errors == []
+    assert values["amount"] == Decimal("1000") and values["payment_date"] == date(2026, 9, 28)
+    assert values["cost_centre"] == "CC-9" and values["description"] == "Fuel"
+
+
+def test_vendors_upload_saves_a_snapshot(uploader, fake_storage):
+    second = list(VENDOR_ROW)
+    second[0], second[1] = "VND-9901", "Phantom Solutions LLC"
+
+    response = client_for(uploader).post(VENDORS_URL, {"file": csv_file([VENDOR_ROW, second], VENDOR_HEADERS)}, format="multipart")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["upload"]["kind"] == "vendors" and body["upload"]["row_count"] == 2
+    upload = DataUpload.objects.get()
+    assert upload.kind == "vendors"
+    assert upload.source_public_id == f"axiomvault/{uploader.organisation_id}/vendors/{upload.id}.csv"
+    assert set(Vendor.objects.values_list("vendor_id", flat=True)) == {"VND-8847", "VND-9901"}
+    assert Vendor.objects.filter(organisation=uploader.organisation, upload=upload).count() == 2
+    assert AuditLog.objects.get().action == AuditLog.VENDORS_UPLOADED
+
+
+def test_duplicate_vendor_id_saves_nothing(uploader):
+    response = client_for(uploader).post(VENDORS_URL, {"file": csv_file([VENDOR_ROW, VENDOR_ROW], VENDOR_HEADERS)}, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["validation_errors"] == [
+        {"row": 3, "field": "vendor_id", "error": "Duplicate vendor: the same vendor_id as row 2."}
+    ]
+    assert Vendor.objects.count() == 0 and DataUpload.objects.count() == 0
+
+
+def test_payments_upload_allows_the_same_invoice_twice(uploader):
+    second = list(PAYMENT_ROW)
+    second[0], second[4] = "TXN-90455", "2026-05-08"
+    rows = [PAYMENT_ROW, second]
+
+    response = client_for(uploader).post(PAYMENTS_URL, {"file": xlsx_file(rows, PAYMENT_HEADERS)}, format="multipart")
+
+    assert response.status_code == 201
+    assert response.json()["upload"]["kind"] == "payments"
+    assert list(Payment.objects.values_list("invoice_number", flat=True)) == ["INV-2024-8847", "INV-2024-8847"]
+    assert Payment.objects.get(transaction_id="TXN-90214").amount == Decimal("42350.00")
+    assert AuditLog.objects.get().action == AuditLog.PAYMENTS_UPLOADED
+
+
+def test_bad_payments_file_saves_nothing(uploader):
+    bad = list(PAYMENT_ROW)
+    bad[3], bad[4] = "-5", "someday"
+
+    body = client_for(uploader).post(PAYMENTS_URL, {"file": csv_file([PAYMENT_ROW, bad, PAYMENT_ROW], PAYMENT_HEADERS)}, format="multipart").json()
+
+    assert body["error"] == "Some rows are invalid. Nothing was saved."
+    # Rows 3 and 4 both repeat row 2's transaction_id, so both are duplicates too.
+    assert {(e["row"], e["field"]) for e in body["validation_errors"]} == {
+        (3, "amount"), (3, "payment_date"), (3, "transaction_id"), (4, "transaction_id")
+    }
+    assert Payment.objects.count() == 0
+
+
+def test_vendor_and_payment_uploads_need_an_organisation_account(db):
+    staff = User.objects.create_user(username="ops2", email="ops2@example.com", password="Str0ng-Passw0rd!", is_staff=True)
+
+    assert APIClient().post(VENDORS_URL, {"file": csv_file([VENDOR_ROW], VENDOR_HEADERS)}, format="multipart").status_code == 401
+    assert client_for(staff).post(PAYMENTS_URL, {"file": csv_file([PAYMENT_ROW], PAYMENT_HEADERS)}, format="multipart").status_code == 403
+
+
+def test_payroll_upload_reports_its_kind(uploader):
+    body = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart").json()
+
+    assert body["upload"]["kind"] == "payroll"

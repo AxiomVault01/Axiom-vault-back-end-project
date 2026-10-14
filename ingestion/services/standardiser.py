@@ -1,60 +1,113 @@
-"""Turns a payroll file's columns and text cells into our standard, typed payroll fields."""
+"""Turns an uploaded file's columns and text cells into our standard, typed fields.
+
+Each file kind (payroll, vendors, payments) is an `UploadSchema`: its fields, what kind of
+value each holds, which are required, and the other column names people use. When ML's
+templates are final, only these schemas change.
+"""
 
 import re
+from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
-REQUIRED_FIELDS = [
-    "employee_id",
-    "employee_name",
-    "department",
-    "salary_basic",
-    "net_salary",
-    "account_number",
-    "pay_period",
-    "payment_date",
-]
-
-# Standard field -> other column names people use for it. When ML's template is final, only
-# this table changes.
-ALIASES = {
-    "employee_id": ["staff_id", "employee_no", "employee_number", "emp_id"],
-    "employee_name": ["name", "full_name", "staff_name"],
-    "department": ["dept"],
-    "salary_basic": ["basic_salary", "basic", "basic_pay"],
-    "net_salary": ["net_pay", "net", "take_home"],
-    "account_number": ["account_no", "bank_account", "acct_no", "account"],
-    "pay_period": ["period", "payroll_period", "month"],
-    "payment_date": ["pay_date", "date_paid"],
-    "role": ["job_title", "designation", "position"],
-    "allowances": ["allowance"],
-    "deductions": ["deduction"],
-    "bank_name": ["bank"],
-    "attendance_days": ["days_present", "attendance"],
-    "leave_days": ["days_on_leave"],
-    "location": ["branch"],
-    "supervisor_id": ["supervisor"],
-    "employment_type": ["contract_type"],
-    "grade_level": ["grade", "level"],
-}
-HEADER_TO_FIELD = {name: field for field, names in ALIASES.items() for name in [field, *names]}
-
-TEXT_MAX_LENGTH = {
-    "employee_id": 100,
-    "employee_name": 255,
-    "department": 255,
-    "pay_period": 20,
-    "role": 100,
-    "bank_name": 100,
-    "location": 100,
-    "supervisor_id": 100,
-    "employment_type": 50,
-    "grade_level": 50,
-}
-MONEY_FIELDS = ["salary_basic", "net_salary", "allowances", "deductions"]
-COUNT_FIELDS = ["attendance_days", "leave_days"]
 DATE_FORMATS = ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"]
 MONEY_MAX = Decimal("9999999999.99")  # Fits DecimalField(max_digits=12, decimal_places=2).
+EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+@dataclass(frozen=True)
+class Field:
+    kind: str  # text, money, count, account, date, email, phone
+    required: bool = False
+    max_length: int | None = None  # text only
+    aliases: tuple[str, ...] = ()
+    blank: object = None  # value for an empty optional cell
+
+
+@dataclass(frozen=True)
+class UploadSchema:
+    kind: str
+    fields: dict
+    duplicate_key: tuple[str, ...]
+    duplicate_message: str
+    header_to_field: dict = dc_field(init=False)
+
+    def __post_init__(self):
+        lookup = {name: name_field for name_field, spec in self.fields.items() for name in [name_field, *spec.aliases]}
+        object.__setattr__(self, "header_to_field", lookup)
+
+    @property
+    def required_fields(self):
+        return [name for name, spec in self.fields.items() if spec.required]
+
+
+def text(max_length, required=False, aliases=()):
+    return Field("text", required=required, max_length=max_length, aliases=tuple(aliases))
+
+
+def money(required=False, aliases=(), blank=None):
+    return Field("money", required=required, aliases=tuple(aliases), blank=blank)
+
+
+PAYROLL_SCHEMA = UploadSchema(
+    kind="payroll",
+    fields={
+        "employee_id": text(100, True, ["staff_id", "employee_no", "employee_number", "emp_id"]),
+        "employee_name": text(255, True, ["name", "full_name", "staff_name"]),
+        "department": text(255, True, ["dept"]),
+        "salary_basic": money(True, ["basic_salary", "basic", "basic_pay"]),
+        "net_salary": money(True, ["net_pay", "net", "take_home"]),
+        "account_number": Field("account", required=True, aliases=("account_no", "bank_account", "acct_no", "account")),
+        "pay_period": text(20, True, ["period", "payroll_period", "month"]),
+        "payment_date": Field("date", required=True, aliases=("pay_date", "date_paid")),
+        "role": text(100, aliases=["job_title", "designation", "position"]),
+        "allowances": money(aliases=["allowance"], blank=Decimal("0")),
+        "deductions": money(aliases=["deduction"], blank=Decimal("0")),
+        "bank_name": text(100, aliases=["bank"]),
+        "attendance_days": Field("count", aliases=("days_present", "attendance")),
+        "leave_days": Field("count", aliases=("days_on_leave",)),
+        "location": text(100, aliases=["branch"]),
+        "supervisor_id": text(100, aliases=["supervisor"]),
+        "employment_type": text(50, aliases=["contract_type"]),
+        "grade_level": text(50, aliases=["grade", "level"]),
+    },
+    duplicate_key=("employee_id", "account_number", "pay_period"),
+    duplicate_message="Duplicate payroll record: same employee, account number, and pay period as row {first}.",
+)
+
+VENDOR_SCHEMA = UploadSchema(
+    kind="vendors",
+    fields={
+        "vendor_id": text(100, True, ["supplier_id", "vendor_code", "vendor_no"]),
+        "vendor_name": text(255, True, ["supplier_name", "vendor", "name"]),
+        "account_number": Field("account", required=True, aliases=("account_no", "bank_account", "acct_no")),
+        "bank_name": text(100, aliases=["bank"]),
+        "registration_number": text(100, aliases=["rc_number", "cac_number", "reg_no"]),
+        "address": text(255, aliases=["vendor_address"]),
+        "phone": Field("phone", aliases=("phone_number", "telephone")),
+        "email": Field("email", aliases=("email_address",)),
+        "date_registered": Field("date", aliases=("registration_date", "onboarded")),
+    },
+    duplicate_key=("vendor_id",),
+    duplicate_message="Duplicate vendor: the same vendor_id as row {first}.",
+)
+
+PAYMENT_SCHEMA = UploadSchema(
+    kind="payments",
+    fields={
+        "transaction_id": text(100, True, ["txn_id", "reference", "payment_ref"]),
+        "vendor_id": text(100, True, ["supplier_id", "vendor_code"]),
+        "invoice_number": text(100, True, ["invoice_no", "invoice", "inv_no"]),
+        "amount": money(True, ["amount_paid", "payment_amount"]),
+        "payment_date": Field("date", required=True, aliases=("date_paid", "pay_date")),
+        "approver": text(255, aliases=["approved_by"]),
+        "cost_centre": text(100, aliases=["cost_center"]),
+        "department": text(255, aliases=["dept"]),
+        "description": text(500, aliases=["narration", "details"]),
+    },
+    duplicate_key=("transaction_id",),
+    duplicate_message="Duplicate payment: the same transaction_id as row {first}.",
+)
 
 
 class RowError(Exception):
@@ -65,67 +118,77 @@ def normalise_header(header: str) -> str:
     return re.sub(r"[\s\-]+", "_", str(header).strip().lower())
 
 
-class PayrollStandardiser:
-    def __init__(self, headers: list[str]):
+class Standardiser:
+    def __init__(self, schema: UploadSchema, headers: list[str]):
+        self.schema = schema
         self.columns = {}  # field -> column index (first matching column wins)
         self.ignored_columns = []
         for index, header in enumerate(headers):
-            field = HEADER_TO_FIELD.get(normalise_header(header))
-            if field and field not in self.columns:
-                self.columns[field] = index
+            name = schema.header_to_field.get(normalise_header(header))
+            if name and name not in self.columns:
+                self.columns[name] = index
             elif str(header).strip():
                 self.ignored_columns.append(str(header).strip())
-        self.missing_columns = [f for f in REQUIRED_FIELDS if f not in self.columns]
+        self.missing_columns = [f for f in schema.required_fields if f not in self.columns]
 
     def row(self, cells: list) -> tuple[dict | None, list[tuple[str, str]]]:
         """Returns (typed values, errors). Values is None for a fully blank row, which is skipped."""
         if all(not isinstance(cell, (date, datetime)) and not str(cell).strip() for cell in cells):
             return None, []
         values, errors = {}, []
-        for field, index in self.columns.items():
+        for name, index in self.columns.items():
             raw = cells[index] if index < len(cells) else ""
             try:
-                values[field] = self._clean(field, raw)
+                values[name] = self._clean(self.schema.fields[name], raw)
             except RowError as exc:
-                errors.append((field, str(exc)))
+                errors.append((name, str(exc)))
         return values, errors
 
-    def _clean(self, field, raw):
+    def _clean(self, spec: Field, raw):
         if isinstance(raw, (datetime, date)):
-            if field == "payment_date":
+            if spec.kind == "date":
                 return raw.date() if isinstance(raw, datetime) else raw
             raw = raw.strftime("%Y-%m-%d")
-        text = str(raw).strip()
-        if not text:
-            if field in REQUIRED_FIELDS:
+        value = str(raw).strip()
+        if not value:
+            if spec.required:
                 raise RowError("This value is required.")
-            return Decimal("0") if field in ("allowances", "deductions") else None
+            return spec.blank if spec.blank is not None else ("" if spec.kind in ("email", "phone") else None)
 
-        if field in MONEY_FIELDS:
-            return self._money(text)
-        if field in COUNT_FIELDS:
-            if not re.fullmatch(r"\d+", text):
+        if spec.kind == "money":
+            return self._money(value)
+        if spec.kind == "count":
+            if not re.fullmatch(r"\d+", value):
                 raise RowError("Enter a whole number that is not negative.")
-            return int(text)
-        if field == "account_number":
-            digits = re.sub(r"[\s\-]", "", text)
+            return int(value)
+        if spec.kind == "account":
+            digits = re.sub(r"[\s\-]", "", value)
             if not re.fullmatch(r"\d{1,20}", digits):
                 raise RowError("Use digits only, at most 20.")
             return digits
-        if field == "payment_date":
+        if spec.kind == "date":
             for fmt in DATE_FORMATS:
                 try:
-                    return datetime.strptime(text, fmt).date()
+                    return datetime.strptime(value, fmt).date()
                 except ValueError:
                     continue
             raise RowError("Use a date like 2026-09-28 or 28/09/2026.")
-        if len(text) > TEXT_MAX_LENGTH[field]:
-            raise RowError(f"Use at most {TEXT_MAX_LENGTH[field]} characters.")
-        return text
+        if spec.kind == "phone":
+            phone = value.replace(" ", "").replace("-", "")
+            if not re.fullmatch(r"\+?[0-9]{7,15}", phone):
+                raise RowError("Enter a valid phone number: 7 to 15 digits, optionally starting with +.")
+            return phone
+        if spec.kind == "email":
+            if len(value) > 254 or not EMAIL_PATTERN.fullmatch(value):
+                raise RowError("Enter a valid email address.")
+            return value.lower()
+        if len(value) > spec.max_length:
+            raise RowError(f"Use at most {spec.max_length} characters.")
+        return value
 
     @staticmethod
-    def _money(text):
-        cleaned = re.sub(r"^(₦|NGN)", "", text.replace(",", "").replace(" ", ""), flags=re.IGNORECASE)
+    def _money(value):
+        cleaned = re.sub(r"^(₦|NGN)", "", value.replace(",", "").replace(" ", ""), flags=re.IGNORECASE)
         try:
             amount = Decimal(cleaned)
         except InvalidOperation:
