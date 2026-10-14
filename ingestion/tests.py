@@ -15,6 +15,8 @@ from ingestion.models import Payroll, PayrollUpload
 from ingestion.services.file_parser import FileError, FileParser
 from ingestion.services.standardiser import PayrollStandardiser
 from ingestion.services.validation_service import ValidationService
+# Imported before the autouse fake replaces them, so the helper itself can be tested.
+from config.file_storage import StorageUnavailable, delete as real_delete, store_private as real_store_private
 
 User = get_user_model()
 UPLOAD_URL = "/api/v1/ingestion/upload-payroll/"
@@ -353,3 +355,101 @@ def test_the_same_employee_in_two_uploads_is_allowed(uploader):
 
     assert first.status_code == second.status_code == 201
     assert Payroll.objects.count() == 2
+
+
+# ---- 7d: keep the source file ----
+
+
+def test_store_private_uploads_a_private_raw_file(monkeypatch):
+    monkeypatch.setenv("CLOUDINARY_URL", "cloudinary://key:secret@demo")
+    with patch("cloudinary.uploader.upload", return_value={"public_id": "axiomvault/o/payroll/u.csv", "bytes": 5}) as upload:
+        stored = real_store_private(b"hello", "axiomvault/o/payroll/u.csv")
+
+    assert stored == {"public_id": "axiomvault/o/payroll/u.csv", "bytes": 5}
+    _, kwargs = upload.call_args
+    assert upload.call_args.args[0] == b"hello"
+    assert kwargs == {
+        "public_id": "axiomvault/o/payroll/u.csv", "resource_type": "raw", "type": "authenticated", "overwrite": False
+    }
+
+
+def test_store_private_needs_configuration(monkeypatch):
+    monkeypatch.delenv("CLOUDINARY_URL", raising=False)
+
+    with pytest.raises(StorageUnavailable):
+        real_store_private(b"hello", "x")
+
+
+def test_store_private_turns_cloudinary_errors_into_storage_unavailable(monkeypatch):
+    monkeypatch.setenv("CLOUDINARY_URL", "cloudinary://key:secret@demo")
+    with patch("cloudinary.uploader.upload", side_effect=RuntimeError("boom")):
+        with pytest.raises(StorageUnavailable):
+            real_store_private(b"hello", "x")
+
+
+def test_delete_never_raises(monkeypatch):
+    monkeypatch.setenv("CLOUDINARY_URL", "cloudinary://key:secret@demo")
+    with patch("cloudinary.uploader.destroy", side_effect=RuntimeError("boom")) as destroy:
+        real_delete("axiomvault/o/payroll/u.csv")
+
+    assert destroy.call_args.kwargs == {"resource_type": "raw", "type": "authenticated", "invalidate": True}
+
+
+def test_upload_keeps_the_exact_original_file(uploader, fake_storage):
+    sent = csv_file([GOOD_ROW])
+    raw = sent.read()
+    sent.seek(0)
+
+    body = client_for(uploader).post(UPLOAD_URL, {"file": sent}, format="multipart").json()
+
+    upload = PayrollUpload.objects.get()
+    expected_id = f"axiomvault/{uploader.organisation_id}/payroll/{upload.id}.csv"
+    assert upload.source_public_id == expected_id
+    assert fake_storage.files[expected_id] == raw
+    assert upload.file_size == len(raw) == body["upload"]["file_size"]
+    assert "source_public_id" not in body["upload"]
+
+
+def test_rejected_files_are_never_stored(uploader, fake_storage):
+    bad = list(GOOD_ROW)
+    bad[4] = "-1"
+
+    client_for(uploader).post(UPLOAD_URL, {"file": csv_file([bad])}, format="multipart")
+
+    assert fake_storage.files == {}
+
+
+def test_storage_failure_gives_503_and_saves_nothing(uploader, monkeypatch):
+    from config import file_storage
+
+    def broken(data, public_id):
+        raise StorageUnavailable("down")
+
+    monkeypatch.setattr(file_storage, "store_private", broken)
+
+    response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "The file could not be stored right now. Nothing was saved. Try again in a few minutes."
+    }
+    assert PayrollUpload.objects.count() == 0 and Payroll.objects.count() == 0
+
+
+def test_a_database_failure_after_storing_removes_the_stored_file(uploader, fake_storage):
+    from ingestion.services.ingestion_service import IngestionService
+
+    with patch("ingestion.models.Payroll.objects.bulk_create", side_effect=RuntimeError("db down")):
+        with pytest.raises(RuntimeError):
+            IngestionService.upload_payroll(csv_file([GOOD_ROW]), uploader)
+
+    assert fake_storage.files == {}
+    assert len(fake_storage.deleted) == 1
+    assert PayrollUpload.objects.count() == 0
+
+
+def test_a_malformed_cloudinary_url_gives_storage_unavailable(monkeypatch):
+    monkeypatch.setenv("CLOUDINARY_URL", "CLOUDINARY_URL=cloudinary://key:secret@demo")
+    with patch("cloudinary.uploader.upload", side_effect=ValueError("Invalid CLOUDINARY_URL scheme")):
+        with pytest.raises(StorageUnavailable):
+            real_store_private(b"hello", "x")

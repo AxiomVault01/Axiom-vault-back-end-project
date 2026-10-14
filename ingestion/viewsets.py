@@ -6,6 +6,7 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.models import AuditLog
+from config.file_storage import StorageUnavailable
 from accounts.permissions import PASSWORD_CHANGE_REQUIRED_MESSAGE, PasswordChangeNotRequired
 
 from .serializers import PayrollUploadSerializer
@@ -15,6 +16,9 @@ from .services.standardiser import ALIASES, REQUIRED_FIELDS
 MAX_FILE_BYTES = 10 * 1024 * 1024
 FILE_TOO_LARGE_MESSAGE = "The file is larger than 10 MB."
 NO_ORGANISATION_MESSAGE = "Only organisation accounts can upload payroll."
+STORAGE_UNAVAILABLE_MESSAGE = (
+    "The file could not be stored right now. Nothing was saved. Try again in a few minutes."
+)
 
 
 class BelongsToOrganisation(BasePermission):
@@ -41,6 +45,9 @@ UploadResponse = inline_serializer(
                 "id": serializers.UUIDField(help_text="The upload's ID. Its rows and, later, its alerts point to it."),
                 "file_name": serializers.CharField(help_text="The name of the file that was sent."),
                 "row_count": serializers.IntegerField(help_text="How many payroll rows were saved (blank rows are skipped)."),
+                "file_size": serializers.IntegerField(
+                    help_text="Size of the original file in bytes. The file itself is kept privately as evidence."
+                ),
                 "created_at": serializers.DateTimeField(help_text="When the upload was saved (ISO 8601)."),
             },
         ),
@@ -81,13 +88,15 @@ class IngestionViewSet(viewsets.ViewSet):
             "- A completely blank row is skipped.\n"
             "- The same employee, account number, and pay period twice in one file is an error.\n\n"
             "**Responses**\n"
-            "- `201`: saved. Show `row_count`, and warn about `ignored_columns` if it is not empty.\n"
+            "- `201`: saved. Show `row_count`, and warn about `ignored_columns` if it is not empty. The "
+            "original file is kept privately as evidence; it is never returned here.\n"
             f"- `400`: nothing was saved. Either a file problem (`error`, and `missing_columns` when required "
             f"columns are absent), or row problems: `validation_errors` lists the first {MAX_ERRORS_SHOWN} "
             "(`row` is the spreadsheet row number, the header being row 1), and `error_count` is the total. "
             "Show them so the user can fix the file and upload again.\n"
             "- `401`: no or expired token. `403`: the account belongs to no organisation, or the user still "
-            "has to change a temporary password. `413`: the file is too large.\n\n"
+            "has to change a temporary password. `413`: the file is too large. `503`: the file could not be "
+            "stored and nothing was saved; ask the user to try again in a few minutes.\n\n"
             "**Authentication:** `Authorization: Bearer <access_token>` of a super admin or team member."
         ),
         request={
@@ -109,6 +118,7 @@ class IngestionViewSet(viewsets.ViewSet):
                                 "id": "9b2f6c1e-4d3a-4f7b-8e2d-1a5c7b9e0f3d",
                                 "file_name": "september-payroll.xlsx",
                                 "row_count": 248,
+                                "file_size": 48213,
                                 "created_at": "2026-10-13T10:15:00Z",
                             },
                             "ignored_columns": ["Remarks"],
@@ -160,6 +170,11 @@ class IngestionViewSet(viewsets.ViewSet):
                 response=OpenApiTypes.OBJECT,
                 examples=[OpenApiExample("Too large", value={"error": FILE_TOO_LARGE_MESSAGE})],
             ),
+            503: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="The original file could not be stored. Nothing was saved.",
+                examples=[OpenApiExample("Storage unavailable", value={"error": STORAGE_UNAVAILABLE_MESSAGE})],
+            ),
         },
     )
     def upload_payroll(self, request):
@@ -173,6 +188,8 @@ class IngestionViewSet(viewsets.ViewSet):
             upload, ignored_columns = IngestionService.upload_payroll(file, request.user)
         except UploadRejected as exc:
             return Response(exc.body, status=status.HTTP_400_BAD_REQUEST)
+        except StorageUnavailable:
+            return Response({"error": STORAGE_UNAVAILABLE_MESSAGE}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         AuditLog.record(
             AuditLog.PAYROLL_UPLOADED,
@@ -187,6 +204,7 @@ class IngestionViewSet(viewsets.ViewSet):
                     "id": str(upload.id),
                     "file_name": upload.file_name,
                     "row_count": upload.row_count,
+                    "file_size": upload.file_size,
                     "created_at": upload.created_at,
                 },
                 "ignored_columns": ignored_columns,

@@ -12,6 +12,7 @@ psycopg==3.2.9
 python-dotenv==1.1.1
 pandas==2.3.1
 openpyxl==3.1.5
+cloudinary==1.44.1
 celery==5.4.0
 redis==6.2.0
 Pillow==11.3.0
