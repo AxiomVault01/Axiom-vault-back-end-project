@@ -1,7 +1,7 @@
-from rest_framework.routers import DefaultRouter
+from django.urls import path
+
 from .viewsets import IngestionViewSet
 
-router = DefaultRouter()
-router.register("ingestion", IngestionViewSet, basename="ingestion")
-
-urlpatterns = router.urls
+urlpatterns = [
+    path("upload-payroll/", IngestionViewSet.as_view({"post": "upload_payroll"}), name="ingestion-upload-payroll"),
+]

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import BankAccount, Payroll
+from .models import Payroll
 
 
 class PayrollSerializer(serializers.ModelSerializer):
@@ -9,16 +9,8 @@ class PayrollSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at"]
 
-class BankAccountSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = BankAccount
-        fields = "__all__"
-        read_only_fields = ["id", "created_at"]
-
-
 class PayrollUploadSerializer(serializers.Serializer):
     file = serializers.FileField(
-        help_text="CSV file for payroll data",
-        label="Payroll CSV File"
+        help_text="The payroll file: .csv or .xlsx, at most 10 MB.",
+        label="Payroll file"
     )

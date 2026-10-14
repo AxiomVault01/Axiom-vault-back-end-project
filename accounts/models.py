@@ -161,6 +161,7 @@ class AuditLog(models.Model):
     TEAM_MEMBER_UPDATED = "team_member_updated"
     TEAM_MEMBER_DEACTIVATED = "team_member_deactivated"
     TEAM_MEMBER_REACTIVATED = "team_member_reactivated"
+    PAYROLL_UPLOADED = "payroll_uploaded"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -171,6 +172,7 @@ class AuditLog(models.Model):
         (TEAM_MEMBER_UPDATED, "Edited a team member"),
         (TEAM_MEMBER_DEACTIVATED, "Deactivated a team member"),
         (TEAM_MEMBER_REACTIVATED, "Reactivated a team member"),
+        (PAYROLL_UPLOADED, "Uploaded a payroll file"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -217,7 +219,7 @@ class AuditLog(models.Model):
             actor_email=getattr(actor, "email", "") or "",
             organisation=organisation,
             organisation_name=organisation.name if organisation else "",
-            target_type="user" if target is not None else "",
+            target_type=target._meta.model_name if target is not None else "",
             target_id=str(target.pk) if target is not None else "",
             details=details or {},
             ip_address=None if ip in (None, UNKNOWN_IP) else ip,
