@@ -525,3 +525,127 @@ def test_notes_on_another_organisations_alert_are_404(uploader):
     make_alert(Organisation.objects.create(name="Lekki Coop"), 1)
 
     assert client_for(uploader).post(alert_url("ALT-0001", "notes"), {"text": "hi"}, format="json").status_code == 404
+
+
+# ---- 15: dashboard and analytics ----
+
+from fraud.dashboard import exposure_level
+
+DASH = "/api/v1/dashboard/"
+
+
+def aged(alert, days_ago):
+    Alert.objects.filter(pk=alert.pk).update(detected_at=timezone.now() - timedelta(days=days_ago))
+    return alert
+
+
+def test_summary_kpis(uploader, org):
+    make_alert(org, 1, severity="critical", status="new", risk_score=98)
+    make_alert(org, 2, severity="critical", status="false_positive", risk_score=98)
+    make_alert(org, 3, severity="high", status="investigating", risk_score=90)
+    make_alert(org, 4, severity="high", status="escalated", risk_score=85)
+    aged(make_alert(org, 5, severity="critical", status="new", risk_score=95), 40)
+    make_alert(Organisation.objects.create(name="Lekki Coop"), 1, severity="critical")
+
+    body = client_for(uploader).get(DASH + "summary/").json()
+
+    assert body["period_days"] == 30
+    assert body["critical_alerts"] == 1
+    assert body["open_investigations"] == 2
+    assert body["active_cases"] == 0
+    # Open alerts: critical 98 (w4), high 90 (w3), high 85 (w3) -> (392 + 270 + 255) / 10 = 91.7
+    assert body["risk_exposure"] == {"score": 92, "level": "critical", "source": "derived"}
+    assert body["alerts_by_severity"] == {"critical": 2, "high": 2, "medium": 0, "low": 0}
+    assert body["alerts_by_status"] == {"new": 1, "investigating": 1, "escalated": 1, "false_positive": 1}
+
+
+@pytest.mark.parametrize("days, expected", [(10, 1), (15, 2), (30, 3)])
+def test_summary_period(uploader, org, days, expected):
+    make_alert(org, 1, severity="critical")
+    aged(make_alert(org, 2, severity="critical"), 12)
+    aged(make_alert(org, 3, severity="critical"), 29)
+
+    assert client_for(uploader).get(DASH + "summary/", {"days": days}).json()["critical_alerts"] == expected
+
+
+@pytest.mark.parametrize("days", ["7", "31", "abc"])
+def test_summary_rejects_other_periods(uploader, days):
+    response = client_for(uploader).get(DASH + "summary/", {"days": days})
+
+    assert response.status_code == 400 and "days" in response.json()
+
+
+def test_summary_for_an_empty_organisation(uploader):
+    body = client_for(uploader).get(DASH + "summary/").json()
+
+    assert body["critical_alerts"] == body["open_investigations"] == body["active_cases"] == 0
+    assert body["risk_exposure"] == {"score": 0, "level": "low", "source": "derived"}
+    assert set(body["alerts_by_status"].values()) == {0}
+
+
+@pytest.mark.parametrize("score, level", [(0, "low"), (24, "low"), (25, "medium"), (49, "medium"), (50, "high"), (74, "high"), (75, "critical"), (100, "critical")])
+def test_exposure_level_bands(score, level):
+    assert exposure_level(score) == level
+
+
+def test_heatmap_counts_by_department_and_risk_type(uploader, org):
+    make_alert(org, 1, department="Finance", rule=Alert.DUPLICATE_BANK_ACCOUNT, risk_type="Duplicate Bank Account")
+    make_alert(org, 2, department="Finance", rule=Alert.DUPLICATE_BANK_ACCOUNT, risk_type="Duplicate Bank Account")
+    make_alert(org, 3, department="Procurement")
+    make_alert(org, 4, department="")
+    aged(make_alert(org, 5, department="Procurement"), 10)
+
+    weekly = client_for(uploader).get(DASH + "heatmap/", {"period": "weekly"}).json()
+    monthly = client_for(uploader).get(DASH + "heatmap/").json()
+
+    assert weekly["period"] == "weekly"
+    assert weekly["departments"] == ["Finance", "Procurement", "Unassigned"]
+    assert weekly["risk_types"] == ["Duplicate Bank Account", "Duplicate Payment"]
+    assert weekly["cells"] == [
+        {"department": "Finance", "risk_type": "Duplicate Bank Account", "count": 2},
+        {"department": "Procurement", "risk_type": "Duplicate Payment", "count": 1},
+        {"department": "Unassigned", "risk_type": "Duplicate Payment", "count": 1},
+    ]
+    assert monthly["period"] == "monthly"
+    assert {"department": "Procurement", "risk_type": "Duplicate Payment", "count": 2} in monthly["cells"]
+
+
+def test_heatmap_rejects_other_periods(uploader):
+    assert client_for(uploader).get(DASH + "heatmap/", {"period": "yearly"}).status_code == 400
+
+
+def test_trends_cover_30_days_with_zeros(uploader, org):
+    make_alert(org, 1, severity="critical")
+    make_alert(org, 2, severity="high")
+    aged(make_alert(org, 3, severity="high"), 3)
+    aged(make_alert(org, 4, severity="low"), 31)
+
+    days = client_for(uploader).get(DASH + "trends/").json()["days"]
+
+    assert len(days) == 30
+    assert days[-1]["date"] == timezone.now().date().isoformat()
+    assert days[-1] == {"date": days[-1]["date"], "critical": 1, "high": 1, "medium": 0, "low": 0}
+    assert days[-4]["high"] == 1
+    assert sum(d["low"] for d in days) == 0
+    assert days[0] == {"date": days[0]["date"], "critical": 0, "high": 0, "medium": 0, "low": 0}
+
+
+def test_investigation_queue_is_most_severe_first(uploader, org):
+    make_alert(org, 1, severity="high", status="investigating")
+    make_alert(org, 2, severity="critical", status="escalated")
+    make_alert(org, 3, severity="critical", status="new")
+    make_alert(org, 4, severity="high", status="investigating")
+
+    body = client_for(uploader).get(DASH + "investigation-queue/").json()
+
+    assert body["count"] == 3
+    assert [a["reference"] for a in body["results"]] == ["ALT-0002", "ALT-0004", "ALT-0001"]
+
+
+@pytest.mark.parametrize("path", ["summary/", "heatmap/", "trends/", "investigation-queue/"])
+def test_dashboard_needs_a_token_and_a_changed_password(org, member, path):
+    assert APIClient().get(DASH + path).status_code == 401
+    User.objects.filter(pk=member.pk).update(must_change_password=True)
+    member.refresh_from_db()
+
+    assert client_for(member).get(DASH + path).status_code == 403
