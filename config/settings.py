@@ -281,6 +281,13 @@ SPECTACULAR_SETTINGS = {
         # 👇 UPDATE THIS LINE TO YOUR EXACT LIVE RENDER ADDRESS BELOW
         {"url": "https://axiom-vault-back-end-project-t9fx.onrender.com", "description": "Production Server"},
     ],
+    # Clear names for choice lists that several fields share (otherwise Swagger invents ones like Status621Enum).
+    "ENUM_NAME_OVERRIDES": {
+        "AlertStatusEnum": "fraud.models.Alert.STATUS_CHOICES",
+        "CaseStatusEnum": "fraud.models.Case.STATUS_CHOICES",
+        "SeverityEnum": "fraud.models.Alert.SEVERITY_CHOICES",
+        "AccountTypeEnum": "accounts.models.User.ACCOUNT_TYPE_CHOICES",
+    },
 }
 
 # =====================

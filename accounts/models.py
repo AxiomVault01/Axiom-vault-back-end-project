@@ -166,10 +166,16 @@ class AuditLog(models.Model):
     PAYROLL_UPLOADED = "payroll_uploaded"
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
+    FILE_UPLOADED = "file_uploaded"
     ALERT_CREATED = "alert_created"
     ALERT_STATUS_CHANGED = "alert_status_changed"
     ALERT_REVIEWER_CHANGED = "alert_reviewer_changed"
     ALERT_NOTE_ADDED = "alert_note_added"
+    CASE_CREATED = "case_created"
+    CASE_STATUS_CHANGED = "case_status_changed"
+    CASE_ASSIGNED = "case_assigned"
+    CASE_COMMENT_ADDED = "case_comment_added"
+    CASE_ESCALATED = "case_escalated"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -183,10 +189,16 @@ class AuditLog(models.Model):
         (PAYROLL_UPLOADED, "Uploaded a payroll file"),
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
+        (FILE_UPLOADED, "Uploaded a file"),
         (ALERT_CREATED, "Detection opened an alert"),
         (ALERT_STATUS_CHANGED, "Changed an alert's status"),
         (ALERT_REVIEWER_CHANGED, "Changed an alert's reviewer"),
         (ALERT_NOTE_ADDED, "Added a note to an alert"),
+        (CASE_CREATED, "Opened a case"),
+        (CASE_STATUS_CHANGED, "Changed a case's status"),
+        (CASE_ASSIGNED, "Changed a case's investigator or reviewer"),
+        (CASE_COMMENT_ADDED, "Commented on a case"),
+        (CASE_ESCALATED, "Escalated a case"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

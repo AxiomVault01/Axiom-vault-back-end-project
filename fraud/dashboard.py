@@ -16,6 +16,7 @@ from accounts.permissions import PASSWORD_CHANGE_REQUIRED_MESSAGE, PasswordChang
 from ingestion.viewsets import NO_ORGANISATION_MESSAGE, BelongsToOrganisation
 
 from .models import Alert
+from .models import Case as InvestigationCase  # Django also has a `Case` (used below).
 from .serializers import AlertListSerializer
 
 OPEN_STATUSES = ["new", "investigating", "escalated"]
@@ -80,7 +81,7 @@ SummarySchema = inline_serializer("DashboardSummary", {
     "period_days": serializers.IntegerField(help_text="The period the numbers cover, in days."),
     "critical_alerts": serializers.IntegerField(help_text="Open alerts with severity `critical` (Critical Alerts card)."),
     "open_investigations": serializers.IntegerField(help_text="Alerts being investigated or escalated (Open Investigations card)."),
-    "active_cases": serializers.IntegerField(help_text="Cases not closed (Active Cases card). Always 0 until cases exist."),
+    "active_cases": serializers.IntegerField(help_text="Cases opened in the period and not closed (Active Cases card)."),
     "risk_exposure": inline_serializer("RiskExposure", {
         "score": serializers.IntegerField(help_text="0-100: severity-weighted average risk score of open alerts."),
         "level": serializers.ChoiceField(choices=["low", "medium", "high", "critical"], help_text="Band of the score: <25 low, <50 medium, <75 high, else critical."),
@@ -127,7 +128,7 @@ class DashboardViewSet(viewsets.GenericViewSet):
             "severity and status.\n\n"
             "- **Critical Alerts:** open (`new`, `investigating`, `escalated`) alerts with severity `critical`.\n"
             "- **Open Investigations:** alerts with status `investigating` or `escalated`.\n"
-            "- **Active Cases:** cases not closed. **Always 0 until the Cases feature lands**; wire the card now.\n"
+            "- **Active Cases:** cases opened in the period that are not closed (any status but `closed`).\n"
             "- **Risk Exposure Score:** `score` 0-100 is the severity-weighted average risk score of open alerts "
             "(weights critical 4, high 3, medium 2, low 1); 0 when there are none. `level` is its band, for the "
             "\"High risk level\" text. `source` is `derived` until ML defines the score.\n\n"
@@ -137,7 +138,7 @@ class DashboardViewSet(viewsets.GenericViewSet):
         parameters=[OpenApiParameter("days", OpenApiTypes.INT, description="10, 15, 20, 25, or 30. Default 30.")],
         responses={
             200: OpenApiResponse(response=SummarySchema, examples=[OpenApiExample("Summary", value={
-                "period_days": 30, "critical_alerts": 3, "open_investigations": 5, "active_cases": 0,
+                "period_days": 30, "critical_alerts": 3, "open_investigations": 5, "active_cases": 2,
                 "risk_exposure": {"score": 72, "level": "high", "source": "derived"},
                 "alerts_by_severity": {"critical": 3, "high": 6, "medium": 0, "low": 0},
                 "alerts_by_status": {"new": 4, "investigating": 3, "escalated": 2, "false_positive": 1},
@@ -158,7 +159,9 @@ class DashboardViewSet(viewsets.GenericViewSet):
             "period_days": days,
             "critical_alerts": alerts.filter(status__in=OPEN_STATUSES, severity="critical").count(),
             "open_investigations": alerts.filter(status__in=INVESTIGATION_STATUSES).count(),
-            "active_cases": 0,
+            "active_cases": InvestigationCase.objects.filter(
+                organisation=request.user.organisation, created_at__gte=self.since(days)
+            ).exclude(status="closed").count(),
             "risk_exposure": risk_exposure(alerts),
             "alerts_by_severity": {s: by_severity.get(s, 0) for s in SEVERITIES},
             "alerts_by_status": {s: by_status.get(s, 0) for s in STATUSES},

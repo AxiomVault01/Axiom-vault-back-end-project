@@ -73,6 +73,7 @@ DETAIL_EXAMPLE = {
     "currency": "NGN",
     "upload": {"id": "e8a95cf3-546e-4177-8475-71c91f873e49", "kind": "payments", "file_name": "payments.xlsx", "created_at": "2026-10-14T18:02:10Z"},
     "notes_count": 0,
+    "case": None,
     "ai_summary": "",
     "ai_recommendations": [],
     "pattern_detections": [],
@@ -119,7 +120,7 @@ class AlertViewSet(viewsets.GenericViewSet):
 
     def get_queryset(self):
         # Scoped to the caller's organisation only, never an ID from the request.
-        return Alert.objects.filter(organisation=self.request.user.organisation).select_related("assigned_reviewer", "upload")
+        return Alert.objects.filter(organisation=self.request.user.organisation).select_related("assigned_reviewer", "upload", "case")
 
     def get_object(self):
         match = REFERENCE_PATTERN.fullmatch(self.kwargs["reference"])

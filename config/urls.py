@@ -25,6 +25,9 @@ urlpatterns = [
     # Ingestion
     path("api/v1/ingestion/", include("ingestion.urls")),
 
+    # General file upload (any attachment, e.g. case evidence)
+    path("api/v1/files/", include("ingestion.file_urls")),
+
     # OpenAPI Schema
     path(
         "api/schema/",
