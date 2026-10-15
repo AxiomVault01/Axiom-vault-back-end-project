@@ -243,6 +243,8 @@ REST_FRAMEWORK = {
         "accounts.permissions.PasswordChangeNotRequired",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # Every list is paginated (decided 2026-10-14): 20 a page, ?page=, ?page_size= up to 100.
+    "DEFAULT_PAGINATION_CLASS": "config.pagination.StandardPagination",
 }
 
 # Lifetime of the one-time token returned by verify-reset-code (Django's password-reset token).

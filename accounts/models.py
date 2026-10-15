@@ -165,6 +165,9 @@ class AuditLog(models.Model):
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
     ALERT_CREATED = "alert_created"
+    ALERT_STATUS_CHANGED = "alert_status_changed"
+    ALERT_REVIEWER_CHANGED = "alert_reviewer_changed"
+    ALERT_NOTE_ADDED = "alert_note_added"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -179,6 +182,9 @@ class AuditLog(models.Model):
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
         (ALERT_CREATED, "Detection opened an alert"),
+        (ALERT_STATUS_CHANGED, "Changed an alert's status"),
+        (ALERT_REVIEWER_CHANGED, "Changed an alert's reviewer"),
+        (ALERT_NOTE_ADDED, "Added a note to an alert"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

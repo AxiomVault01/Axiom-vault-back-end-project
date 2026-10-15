@@ -12,7 +12,7 @@ from django.db import transaction
 from django.db.models import Max
 
 from accounts.models import AuditLog, Organisation
-from fraud.models import Alert
+from fraud.models import Alert, AlertEvent
 from ingestion.models import DataUpload, Payment, Payroll, Vendor
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,9 @@ def create_alerts(organisation, findings, upload) -> list[Alert]:
                 continue
             existing.add(finding["fingerprint"])
             number += 1
-            created.append(Alert.objects.create(organisation=organisation, number=number, upload=upload, **finding))
+            alert = Alert.objects.create(organisation=organisation, number=number, upload=upload, **finding)
+            AlertEvent.objects.create(alert=alert, type=AlertEvent.CREATED, to_status=alert.status, detail=alert.title)
+            created.append(alert)
         for alert in created:
             AuditLog.record(
                 AuditLog.ALERT_CREATED,
