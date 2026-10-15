@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 from accounts.models import Organisation
@@ -40,6 +41,9 @@ class Alert(models.Model):
     entity_name = models.CharField(max_length=255)
     entity_ref = models.CharField(max_length=100)
     department = models.CharField(max_length=255, blank=True, default="")
+    assigned_reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="assigned_alerts"
+    )
     upload = models.ForeignKey(
         "ingestion.DataUpload", on_delete=models.PROTECT, null=True, blank=True, related_name="alerts"
     )
@@ -73,3 +77,49 @@ class Alert(models.Model):
 
     def __str__(self):
         return f"{self.reference} {self.risk_type} ({self.severity})"
+
+
+class AlertEvent(models.Model):
+    """One entry in an alert's history: created, status changed, reviewer changed, note added."""
+
+    CREATED = "created"
+    STATUS_CHANGED = "status_changed"
+    REVIEWER_ASSIGNED = "reviewer_assigned"
+    REVIEWER_REMOVED = "reviewer_removed"
+    NOTE_ADDED = "note_added"
+    TYPE_CHOICES = [
+        (CREATED, "Alert created"),
+        (STATUS_CHANGED, "Status changed"),
+        (REVIEWER_ASSIGNED, "Reviewer assigned"),
+        (REVIEWER_REMOVED, "Reviewer removed"),
+        (NOTE_ADDED, "Note added"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    alert = models.ForeignKey(Alert, on_delete=models.CASCADE, related_name="events")
+    type = models.CharField(max_length=30, choices=TYPE_CHOICES)
+    # Null actor means the system (detection).
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    from_status = models.CharField(max_length=20, blank=True, default="")
+    to_status = models.CharField(max_length=20, blank=True, default="")
+    detail = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "alert_events"
+        ordering = ["created_at"]
+
+
+class AlertNote(models.Model):
+    """A note on an alert, such as the "Instruction to Reviewer". Notes are never edited."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    alert = models.ForeignKey(Alert, on_delete=models.CASCADE, related_name="notes")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+    text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "alert_notes"
+        ordering = ["-created_at"]
+

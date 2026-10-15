@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
@@ -288,3 +289,239 @@ def test_detection_error_never_undoes_the_upload(uploader):
     assert response.status_code == 201
     assert response.json()["detection"] == {"status": "failed", "alerts_created": 0, "alerts": []}
     assert Payment.objects.count() == 2 and Alert.objects.count() == 0
+
+
+# ---- 9: alert review ----
+
+from fraud.models import AlertEvent, AlertNote
+
+ALERTS_URL = "/api/v1/fraud/alerts/"
+
+
+def alert_url(reference, action=""):
+    return f"{ALERTS_URL}{reference}/" + (f"{action}/" if action else "")
+
+
+def make_alert(organisation, number, **overrides):
+    values = {
+        "rule": Alert.DUPLICATE_PAYMENT, "risk_type": "Duplicate Payment", "title": f"Alert {number}",
+        "explanation": "Paid twice.", "severity": "high", "risk_score": 90, "confidence": 90, "entity_type": "vendor",
+        "entity_name": "Acme Supplies", "entity_ref": "VND-8847", "department": "Procurement",
+        "fingerprint": f"test:{number}",
+    }
+    values.update(overrides)
+    alert = Alert.objects.create(organisation=organisation, number=number, **values)
+    AlertEvent.objects.create(alert=alert, type=AlertEvent.CREATED, to_status=alert.status, detail=alert.title)
+    return alert
+
+
+@pytest.fixture
+def member(org):
+    return User.objects.create_user(
+        username="ada", email="ada@ikejacoop.ng", password="Str0ng-Passw0rd!", full_name="Ada Obi", organisation=org,
+        account_type="team_member", is_verified=True,
+    )
+
+
+def test_detection_records_a_created_event(org):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    payment(upload, "T1")
+    payment(upload, "T2")
+
+    [alert] = run_detection(upload)
+
+    assert list(alert.events.values_list("type", "to_status")) == [("created", "new")]
+
+
+def test_list_is_paginated_scoped_and_newest_first(uploader, org):
+    for number in range(1, 24):
+        make_alert(org, number)
+    make_alert(Organisation.objects.create(name="Lekki Coop"), 1, title="Not mine")
+
+    first = client_for(uploader).get(ALERTS_URL).json()
+    second = client_for(uploader).get(ALERTS_URL, {"page": 2}).json()
+
+    assert first["count"] == 23 and len(first["results"]) == 20 and len(second["results"]) == 3
+    assert first["results"][0]["reference"] == "ALT-0023"
+    assert set(first["results"][0]) == {
+        "reference", "risk_type", "rule", "title", "entity_type", "entity_name", "entity_ref", "department",
+        "severity", "status", "risk_score", "confidence", "assigned_reviewer", "detected_at",
+    }
+    assert "Not mine" not in {a["title"] for a in first["results"] + second["results"]}
+
+
+def test_list_filters_and_search(uploader, org, member):
+    make_alert(org, 1, severity="critical", status="new", department="Finance", entity_name="Phantom Solutions LLC")
+    make_alert(org, 2, severity="high", status="investigating", rule=Alert.DUPLICATE_BANK_ACCOUNT,
+               risk_type="Duplicate Bank Account", entity_type="employee", entity_name="Ada Obi", entity_ref="EMP001")
+    make_alert(org, 3, severity="high", status="false_positive", assigned_reviewer=member)
+    client = client_for(uploader)
+
+    def refs(**params):
+        return [a["reference"] for a in client.get(ALERTS_URL, params).json()["results"]]
+
+    assert refs(status="new") == ["ALT-0001"]
+    assert refs(severity="high") == ["ALT-0003", "ALT-0002"]
+    assert refs(rule="duplicate_bank_account") == ["ALT-0002"]
+    assert refs(department="finance") == ["ALT-0001"]
+    assert refs(reviewer=str(member.id)) == ["ALT-0003"]
+    assert refs(reviewer="none") == ["ALT-0002", "ALT-0001"]
+    assert refs(search="phantom") == ["ALT-0001"]
+    assert refs(search="emp001") == ["ALT-0002"]
+    assert refs(search="alt-0003") == ["ALT-0003"]
+    assert refs(search="bank account") == ["ALT-0002"]
+    assert refs(severity="high", status="investigating") == ["ALT-0002"]
+
+
+@pytest.mark.parametrize("params, field", [({"status": "closed"}, "status"), ({"severity": "extreme"}, "severity"), ({"reviewer": "bob"}, "reviewer")])
+def test_list_rejects_unknown_filter_values(uploader, params, field):
+    response = client_for(uploader).get(ALERTS_URL, params)
+
+    assert response.status_code == 400 and field in response.json()
+
+
+def test_detail_by_reference_in_any_letter_case(uploader, org):
+    upload = make_upload(org, DataUpload.PAYMENTS)
+    make_alert(org, 7, upload=upload, flagged_records=[{"transaction_id": "T1"}], timeline=[{"date": "2026-05-05", "label": "Payment", "detail": "x"}])
+
+    body = client_for(uploader).get(alert_url("alt-0007")).json()
+
+    assert body["reference"] == "ALT-0007" and body["explanation"] == "Paid twice."
+    assert body["flagged_records"] == [{"transaction_id": "T1"}] and body["evidence"] == []
+    assert body["upload"]["id"] == str(upload.id) and body["upload"]["kind"] == "payments"
+    assert body["currency"] == "NGN" and body["confidence_source"] == "derived" and body["notes_count"] == 0
+    assert body["ai_summary"] == "" and body["ai_recommendations"] == [] and body["ai_confidence"] is None
+
+
+@pytest.mark.parametrize("reference", ["ALT-0099", "ALT-1", "XYZ", "ALT-00a1"])
+def test_unknown_or_malformed_references_are_404(uploader, org, reference):
+    make_alert(org, 1)
+
+    assert client_for(uploader).get(alert_url(reference)).status_code == 404
+
+
+def test_other_organisations_alert_is_404(uploader):
+    make_alert(Organisation.objects.create(name="Lekki Coop"), 1)
+
+    assert client_for(uploader).get(alert_url("ALT-0001")).status_code == 404
+
+
+def test_alerts_need_a_token_and_a_changed_password(org, member):
+    assert APIClient().get(ALERTS_URL).status_code == 401
+    User.objects.filter(pk=member.pk).update(must_change_password=True)
+    member.refresh_from_db()
+
+    assert client_for(member).get(ALERTS_URL).json()["code"] == "password_change_required"
+
+
+def test_team_member_can_review_alerts(org, member):
+    make_alert(org, 1)
+
+    assert client_for(member).get(ALERTS_URL).json()["count"] == 1
+
+
+@pytest.mark.parametrize("new_status", ["investigating", "escalated", "false_positive"])
+def test_status_change_records_history_and_audit(uploader, org, new_status):
+    make_alert(org, 1)
+
+    body = client_for(uploader).post(alert_url("ALT-0001", "status"), {"status": new_status, "note": "  Checked.  "}, format="json").json()
+
+    assert body["status"] == new_status
+    event = AlertEvent.objects.get(type="status_changed")
+    assert (event.from_status, event.to_status, event.detail, event.actor) == ("new", new_status, "Checked.", uploader)
+    audit = AuditLog.objects.get(action=AuditLog.ALERT_STATUS_CHANGED)
+    assert audit.details == {"reference": "ALT-0001", "from": "new", "to": new_status} and audit.actor == uploader
+
+
+def test_a_false_positive_can_be_reopened(uploader, org):
+    make_alert(org, 1, status="false_positive")
+
+    assert client_for(uploader).post(alert_url("ALT-0001", "status"), {"status": "new"}, format="json").json()["status"] == "new"
+
+
+def test_status_change_rejects_same_or_unknown_status(uploader, org):
+    make_alert(org, 1)
+    client = client_for(uploader)
+
+    same = client.post(alert_url("ALT-0001", "status"), {"status": "new"}, format="json")
+    unknown = client.post(alert_url("ALT-0001", "status"), {"status": "closed"}, format="json")
+
+    assert same.status_code == 400 and same.json() == {"status": ["The alert is already New."]}
+    assert unknown.status_code == 400
+    assert not AlertEvent.objects.filter(type="status_changed").exists()
+
+
+def test_history_is_oldest_first_and_names_the_actor(uploader, org):
+    make_alert(org, 1)
+    AlertEvent.objects.update(created_at=timezone.now() - timedelta(minutes=1))
+    client = client_for(uploader)
+    client.post(alert_url("ALT-0001", "status"), {"status": "investigating"}, format="json")
+
+    results = client.get(alert_url("ALT-0001", "history")).json()["results"]
+
+    assert [e["type"] for e in results] == ["created", "status_changed"]
+    assert results[0]["actor"] is None
+    assert results[1]["actor"] == {"id": str(uploader.id), "full_name": uploader.full_name}
+
+
+def test_assign_and_remove_a_reviewer(uploader, org, member):
+    make_alert(org, 1)
+    client = client_for(uploader)
+
+    assigned = client.put(alert_url("ALT-0001", "reviewer"), {"reviewer_id": str(member.id)}, format="json").json()
+    removed = client.put(alert_url("ALT-0001", "reviewer"), {"reviewer_id": None}, format="json").json()
+
+    assert assigned["assigned_reviewer"] == {"id": str(member.id), "full_name": "Ada Obi", "email": "ada@ikejacoop.ng"}
+    assert removed["assigned_reviewer"] is None
+    assert list(AlertEvent.objects.filter(type__startswith="reviewer").values_list("type", "detail")) == [
+        ("reviewer_assigned", "Ada Obi"), ("reviewer_removed", "")
+    ]
+    assert AuditLog.objects.filter(action=AuditLog.ALERT_REVIEWER_CHANGED).count() == 2
+
+
+def test_reviewer_must_be_an_active_member_of_the_organisation(uploader, org, member):
+    make_alert(org, 1)
+    outsider = User.objects.create_user(username="x", email="x@lekki.ng", password="Str0ng-Passw0rd!",
+                                        organisation=Organisation.objects.create(name="Lekki Coop"))
+    User.objects.filter(pk=member.pk).update(is_active=False)
+    client = client_for(uploader)
+
+    for reviewer_id in (str(outsider.id), str(member.id), "3f2a7c9e-1b4d-4e8a-9c2f-6d5e4b3a2c1d"):
+        response = client.put(alert_url("ALT-0001", "reviewer"), {"reviewer_id": reviewer_id}, format="json")
+        assert response.status_code == 400
+        assert response.json() == {"reviewer_id": ["Choose an active member of your organisation."]}
+    assert Alert.objects.get().assigned_reviewer is None
+
+
+def test_notes_are_added_and_listed_newest_first(uploader, org):
+    make_alert(org, 1)
+    client = client_for(uploader)
+
+    first = client.post(alert_url("ALT-0001", "notes"), {"text": "  Check approvals.  "}, format="json")
+    # Windows' clock ticks every ~15 ms, so give the first note a clearly earlier time.
+    AlertNote.objects.update(created_at=timezone.now() - timedelta(minutes=1))
+    client.post(alert_url("ALT-0001", "notes"), {"text": "Escalate if confirmed."}, format="json")
+    listed = client.get(alert_url("ALT-0001", "notes")).json()
+
+    assert first.status_code == 201
+    assert first.json()["text"] == "Check approvals." and first.json()["author"]["id"] == str(uploader.id)
+    assert [n["text"] for n in listed["results"]] == ["Escalate if confirmed.", "Check approvals."]
+    assert client.get(alert_url("ALT-0001")).json()["notes_count"] == 2
+    assert AlertEvent.objects.filter(type="note_added").count() == 2
+    assert AuditLog.objects.filter(action=AuditLog.ALERT_NOTE_ADDED).count() == 2
+
+
+@pytest.mark.parametrize("text, message", [("   ", "This field may not be blank."), ("x" * 2001, "Ensure this field has no more than 2000 characters.")])
+def test_notes_reject_empty_or_long_text(uploader, org, text, message):
+    make_alert(org, 1)
+
+    response = client_for(uploader).post(alert_url("ALT-0001", "notes"), {"text": text}, format="json")
+
+    assert response.status_code == 400 and response.json() == {"text": [message]}
+    assert AlertNote.objects.count() == 0
+
+
+def test_notes_on_another_organisations_alert_are_404(uploader):
+    make_alert(Organisation.objects.create(name="Lekki Coop"), 1)
+
+    assert client_for(uploader).post(alert_url("ALT-0001", "notes"), {"text": "hi"}, format="json").status_code == 404

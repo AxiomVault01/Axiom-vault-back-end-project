@@ -2253,7 +2253,8 @@ def test_list_and_detail_show_only_my_own_team(api_client, super_admin):
     listed = client.get(TEAM_URL)
 
     assert listed.status_code == 200
-    assert [m["id"] for m in listed.json()] == [str(mine.id)]
+    assert listed.json()["count"] == 1
+    assert [m["id"] for m in listed.json()["results"]] == [str(mine.id)]
     assert client.get(member_url(mine.id)).json()["email"] == mine.email
     assert client.get(member_url(theirs.id)).status_code == 404
     assert client.get(member_url(super_admin.id)).status_code == 404
@@ -2265,7 +2266,7 @@ def test_list_is_newest_first(api_client, super_admin):
     second = add_member(super_admin, email="second@ikejacoop.ng")
     User.objects.filter(pk=first.pk).update(date_joined=timezone.now() - timedelta(days=1))
 
-    listed = bearer(api_client, super_admin).get(TEAM_URL).json()
+    listed = bearer(api_client, super_admin).get(TEAM_URL).json()["results"]
 
     assert [m["id"] for m in listed] == [str(second.id), str(first.id)]
 
@@ -2387,6 +2388,12 @@ def test_password_reset_also_clears_the_temporary_password_flag(super_admin):
 SOME_ID = "3f2a7c9e-1b4d-4e8a-9c2f-6d5e4b3a2c1d"
 PROTECTED_ROUTES = [
     ("get", "/api/v1/team/members/"),
+    ("get", "/api/v1/fraud/alerts/"),
+    ("get", "/api/v1/fraud/alerts/ALT-0001/"),
+    ("post", "/api/v1/fraud/alerts/ALT-0001/status/"),
+    ("get", "/api/v1/fraud/alerts/ALT-0001/history/"),
+    ("put", "/api/v1/fraud/alerts/ALT-0001/reviewer/"),
+    ("post", "/api/v1/fraud/alerts/ALT-0001/notes/"),
     ("post", "/api/v1/ingestion/upload-payroll/"),
     ("post", "/api/v1/ingestion/upload-vendors/"),
     ("post", "/api/v1/ingestion/upload-payments/"),
@@ -2613,3 +2620,34 @@ def test_failed_actions_write_nothing(super_admin):
     client.post(member_url(SOME_ID, "deactivate"))
 
     assert AuditLog.objects.count() == 0
+
+
+# ---- 34: pagination ----
+
+
+@pytest.mark.django_db
+def test_team_list_is_paginated(api_client, super_admin):
+    for i in range(25):
+        create_user(f"m{i}@ikejacoop.ng", organisation_name="Ikeja Coop", account_type="team_member")
+    client = bearer(api_client, super_admin)
+
+    first = client.get(TEAM_URL).json()
+    second = client.get(TEAM_URL, {"page": 2}).json()
+    small = client.get(TEAM_URL, {"page_size": 5}).json()
+    capped = client.get(TEAM_URL, {"page_size": 500}).json()
+
+    assert first["count"] == 25 and len(first["results"]) == 20 and first["previous"] is None
+    assert first["next"].endswith("?page=2")
+    assert len(second["results"]) == 5 and second["next"] is None
+    assert {m["id"] for m in first["results"]}.isdisjoint({m["id"] for m in second["results"]})
+    assert len(small["results"]) == 5 and "page_size=5" in small["next"]
+    assert len(capped["results"]) == 25
+
+
+@pytest.mark.django_db
+def test_a_page_past_the_end_is_404(api_client, super_admin):
+    response = bearer(api_client, super_admin).get(TEAM_URL, {"page": 9})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Invalid page."}
+

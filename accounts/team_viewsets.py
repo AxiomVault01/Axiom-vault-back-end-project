@@ -70,12 +70,18 @@ MEMBER_OK = OpenApiResponse(
         description=(
             "**Team screen.** Returns every team member of the super admin's organisation, newest first, "
             "including deactivated ones (`is_active: false`). The super admin's own account is not in the "
-            "list. The result is a plain array; there is no pagination.\n\n" + AUTH_NOTE
+            "list.\n\n**Paginated:** 20 a page by default. `?page=2` for the next page, `?page_size=` up to "
+            "100. The body is `{count, next, previous, results}`; follow `next` until it is `null`. A page "
+            "past the end is 404.\n\n" + AUTH_NOTE
         ),
         responses={
             200: OpenApiResponse(
                 response=TeamMemberSerializer(many=True),
-                examples=[OpenApiExample("Team", value=[MEMBER_EXAMPLE])],
+                examples=[
+                    OpenApiExample(
+                        "Team", value={"count": 1, "next": None, "previous": None, "results": [MEMBER_EXAMPLE]}
+                    )
+                ],
             ),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
@@ -105,7 +111,8 @@ class TeamMemberViewSet(viewsets.GenericViewSet):
         return get_object_or_404(self.get_queryset(), pk=self.kwargs["pk"])
 
     def list(self, request):
-        return Response(TeamMemberSerializer(self.get_queryset(), many=True).data)
+        page = self.paginate_queryset(self.get_queryset())
+        return self.get_paginated_response(TeamMemberSerializer(page, many=True).data)
 
     def retrieve(self, request, pk=None):
         return Response(TeamMemberSerializer(self.get_object()).data)
