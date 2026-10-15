@@ -170,6 +170,11 @@ class AuditLog(models.Model):
     ALERT_STATUS_CHANGED = "alert_status_changed"
     ALERT_REVIEWER_CHANGED = "alert_reviewer_changed"
     ALERT_NOTE_ADDED = "alert_note_added"
+    CASE_CREATED = "case_created"
+    CASE_STATUS_CHANGED = "case_status_changed"
+    CASE_ASSIGNED = "case_assigned"
+    CASE_COMMENT_ADDED = "case_comment_added"
+    CASE_ESCALATED = "case_escalated"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -187,6 +192,11 @@ class AuditLog(models.Model):
         (ALERT_STATUS_CHANGED, "Changed an alert's status"),
         (ALERT_REVIEWER_CHANGED, "Changed an alert's reviewer"),
         (ALERT_NOTE_ADDED, "Added a note to an alert"),
+        (CASE_CREATED, "Opened a case"),
+        (CASE_STATUS_CHANGED, "Changed a case's status"),
+        (CASE_ASSIGNED, "Changed a case's investigator or reviewer"),
+        (CASE_COMMENT_ADDED, "Commented on a case"),
+        (CASE_ESCALATED, "Escalated a case"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

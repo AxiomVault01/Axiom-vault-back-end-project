@@ -62,11 +62,12 @@ class AlertDetailSerializer(AlertListSerializer):
     upload = serializers.SerializerMethodField(help_text="The upload that triggered the alert, or `null`.")
     evidence = serializers.SerializerMethodField(help_text="Evidence files. Always `[]` until evidence uploads exist.")
     notes_count = serializers.SerializerMethodField(help_text="How many notes the alert has.")
+    case = serializers.SerializerMethodField(help_text="Reference of the case investigating it (`CASE-0001`), or `null`.")
 
     class Meta(AlertListSerializer.Meta):
         fields = AlertListSerializer.Meta.fields + [
             "explanation", "confidence_source", "flagged_records", "timeline", "evidence", "currency", "upload",
-            "notes_count", "ai_summary", "ai_recommendations", "pattern_detections", "ai_confidence", "updated_at",
+            "notes_count", "case", "ai_summary", "ai_recommendations", "pattern_detections", "ai_confidence", "updated_at",
         ]
         read_only_fields = fields
         extra_kwargs = {
@@ -97,6 +98,10 @@ class AlertDetailSerializer(AlertListSerializer):
     @extend_schema_field(serializers.IntegerField())
     def get_notes_count(self, alert):
         return alert.notes.count()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_case(self, alert):
+        return alert.case.reference if alert.case_id else None
 
 
 class AlertEventSerializer(serializers.ModelSerializer):

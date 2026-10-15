@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from accounts.demo import ADMIN_EMAIL, DEMO_ORGANISATION, demo_counts, seed
 from accounts.models import AuditLog, Organisation
-from fraud.models import Alert, AlertEvent, AlertNote
+from fraud.models import Alert, AlertEvent, AlertNote, Case, CaseComment, CaseEvent
 from ingestion.models import DataUpload, Payment, Payroll, Vendor
 
 User = get_user_model()
@@ -43,6 +43,13 @@ def test_seed_builds_every_screen():
     assert AlertNote.objects.filter(alert__organisation=organisation).count() == 3
     assert AlertEvent.objects.filter(alert__organisation=organisation, type="status_changed").count() == 3
     assert alerts.filter(entity_name="Phantom Solutions LLC", severity="critical").exists()
+
+    cases = Case.objects.filter(organisation=organisation)
+    assert set(cases.values_list("status", flat=True)) == {"investigating", "escalated"}
+    assert {c.reference for c in cases} == {"CASE-0001", "CASE-0002"}
+    assert alerts.exclude(case=None).count() == 2
+    assert CaseComment.objects.filter(case__organisation=organisation).count() == 2
+    assert cases.get(status="escalated").escalation_reason == "legal_risk"
 
 
 @pytest.mark.django_db
@@ -107,6 +114,7 @@ def test_clear_removes_only_demo_data():
     assert set(DataUpload.objects.values_list("pk", flat=True)) == {real_upload.pk}
     assert Payroll.objects.count() == Vendor.objects.count() == Payment.objects.count() == Alert.objects.count() == 0
     assert AlertEvent.objects.count() == AlertNote.objects.count() == 0
+    assert Case.objects.count() == CaseEvent.objects.count() == CaseComment.objects.count() == 0
     assert list(AuditLog.objects.values_list("actor_email", flat=True)) == ["owner@ikejacoop.ng"]
     assert Organisation.objects.filter(pk=real.pk).exists() and User.objects.filter(pk=owner.pk).exists()
 

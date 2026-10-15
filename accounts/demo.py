@@ -13,7 +13,7 @@ from django.db import models, transaction
 from django.utils import timezone
 
 from accounts.models import AuditLog, Organisation
-from fraud.models import Alert, AlertEvent, AlertNote
+from fraud.models import Alert, AlertEvent, AlertNote, Case, CaseComment, CaseEvent
 from fraud.services.detection import run_detection
 from ingestion.models import DataUpload, Payment, Payroll, Vendor
 
@@ -148,6 +148,46 @@ def _vary(alerts, admin, members):
             AlertEvent.objects.create(alert=alert, type=AlertEvent.STATUS_CHANGED, actor=admin, from_status="new", to_status=status)
 
 
+def _cases(alerts, admin, members):
+    """Two cases: the investigating alert's case and the escalated alert's case, with history and comments."""
+    now = timezone.now()
+    ada, tunde = members[0], members[1]
+    plans = [
+        # alert index, number, status, investigator, reviewer, days ago, comment
+        (0, 1, "investigating", ada, tunde, 1, "Asked payroll for both employees' bank mandates."),
+        (1, 2, "escalated", tunde, ada, 4, "GTBank confirmed one account holder for all three salaries."),
+    ]
+    cases = []
+    for index, number, status, investigator, reviewer, days_ago, comment in plans:
+        alert = Alert.objects.get(pk=alerts[index].pk)
+        opened = now - timedelta(days=days_ago, hours=2)
+        case = Case.objects.create(
+            organisation=alert.organisation, number=number, title=alert.title, priority=alert.severity, status=status,
+            investigator=investigator, reviewer=reviewer, created_by=admin,
+        )
+        Alert.objects.filter(pk=alert.pk).update(case=case)
+        CaseEvent.objects.create(case=case, type=CaseEvent.CREATED, actor=admin, to_status="new", detail=case.title)
+        CaseEvent.objects.create(case=case, type=CaseEvent.INVESTIGATOR_ASSIGNED, actor=admin, detail=investigator.full_name)
+        CaseEvent.objects.create(case=case, type=CaseEvent.REVIEWER_ASSIGNED, actor=admin, detail=reviewer.full_name)
+        CaseEvent.objects.create(case=case, type=CaseEvent.STATUS_CHANGED, actor=investigator, from_status="new", to_status="investigating")
+        CaseComment.objects.create(case=case, author=investigator, text=comment)
+        CaseEvent.objects.create(case=case, type=CaseEvent.COMMENT_ADDED, actor=investigator, detail=comment)
+        if status == "escalated":
+            Case.objects.filter(pk=case.pk).update(
+                escalation_reason="legal_risk", escalated_to=admin, escalated_at=opened + timedelta(days=2),
+                escalation_notes="Possible ghost workers; legal should review before payroll runs again.",
+            )
+            CaseEvent.objects.create(
+                case=case, type=CaseEvent.ESCALATED, actor=tunde, from_status="investigating", to_status="escalated",
+                detail=f"Escalated to {admin.full_name}: Potential legal or regulatory violation",
+            )
+        Case.objects.filter(pk=case.pk).update(created_at=opened)
+        for offset, event in enumerate(case.events.order_by("created_at")):
+            CaseEvent.objects.filter(pk=event.pk).update(created_at=opened + timedelta(hours=offset * 6))
+        cases.append(case)
+    return cases
+
+
 def seed(password=DEFAULT_PASSWORD, reset=False) -> dict:
     """Creates the demo organisation and its data. Raises DemoExists unless `reset` when it is already there."""
     with transaction.atomic():
@@ -175,6 +215,7 @@ def seed(password=DEFAULT_PASSWORD, reset=False) -> dict:
         for upload in [*payroll_uploads, payments_upload]:
             alerts += run_detection(upload)
         _vary(alerts, admin, members)
+        _cases(alerts, admin, members)
     return {"organisation": organisation, "admin": admin, "members": members, "alerts": len(alerts)}
 
 
@@ -188,6 +229,7 @@ def demo_counts() -> dict:
         "vendors": Vendor.objects.filter(organisation__in=orgs).count(),
         "payments": Payment.objects.filter(organisation__in=orgs).count(),
         "alerts": Alert.objects.filter(organisation__in=orgs).count(),
+        "cases": Case.objects.filter(organisation__in=orgs).count(),
         "audit rows": AuditLog.objects.filter(organisation__in=orgs).count(),
     }
 
@@ -197,6 +239,7 @@ def clear() -> dict:
     counts = demo_counts()
     with transaction.atomic():
         orgs = list(demo_organisations())
+        Case.objects.filter(organisation__in=orgs).delete()  # Their events and comments go with them.
         Alert.objects.filter(organisation__in=orgs).delete()  # Events and notes go with them (cascade).
         for model in (Payroll, Vendor, Payment):
             model.objects.filter(organisation__in=orgs).delete()
