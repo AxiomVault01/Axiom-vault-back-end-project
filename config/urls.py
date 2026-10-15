@@ -19,6 +19,9 @@ urlpatterns = [
     # Fraud Detection
     path("api/v1/fraud/", include("fraud.urls")),
 
+    # Dashboard and Analytics screens
+    path("api/v1/dashboard/", include("fraud.dashboard_urls")),
+
     # Ingestion
     path("api/v1/ingestion/", include("ingestion.urls")),
 
