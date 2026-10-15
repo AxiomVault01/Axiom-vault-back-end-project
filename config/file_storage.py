@@ -6,6 +6,7 @@ The Cloudinary SDK reads its account from the CLOUDINARY_URL environment variabl
 
 import logging
 import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -49,3 +50,24 @@ def delete(public_id: str) -> None:
         cloudinary.uploader.destroy(public_id, resource_type="raw", type="authenticated", invalidate=True)
     except Exception as exc:
         logger.warning("Cloudinary delete failed for %s: %s", public_id, type(exc).__name__)
+
+
+def download_url(public_id: str, file_name: str, expires_in: int = 3600) -> tuple[str, int]:
+    """A signed link that downloads a private file until it expires. Returns (url, expires_at unix time).
+
+    Raises StorageUnavailable when storage is not set up. Building the link needs no network call.
+    """
+    if not is_configured():
+        raise StorageUnavailable("CLOUDINARY_URL is not set")
+    expires_at = int(time.time()) + expires_in
+    try:
+        import cloudinary.utils
+
+        # `attachment` makes the browser save the file instead of opening it.
+        url = cloudinary.utils.private_download_url(
+            public_id, "", resource_type="raw", type="authenticated", attachment=True, expires_at=expires_at
+        )
+    except Exception as exc:
+        logger.warning("Cloudinary link failed for %s: %s", public_id, type(exc).__name__)
+        raise StorageUnavailable("Cloudinary link failed") from exc
+    return url, expires_at

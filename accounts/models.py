@@ -166,6 +166,7 @@ class AuditLog(models.Model):
     PAYROLL_UPLOADED = "payroll_uploaded"
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
+    FILE_UPLOADED = "file_uploaded"
     ALERT_CREATED = "alert_created"
     ALERT_STATUS_CHANGED = "alert_status_changed"
     ALERT_REVIEWER_CHANGED = "alert_reviewer_changed"
@@ -188,6 +189,7 @@ class AuditLog(models.Model):
         (PAYROLL_UPLOADED, "Uploaded a payroll file"),
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
+        (FILE_UPLOADED, "Uploaded a file"),
         (ALERT_CREATED, "Detection opened an alert"),
         (ALERT_STATUS_CHANGED, "Changed an alert's status"),
         (ALERT_REVIEWER_CHANGED, "Changed an alert's reviewer"),

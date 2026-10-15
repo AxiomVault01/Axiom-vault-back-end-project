@@ -25,6 +25,9 @@ class FakeStorage:
         self.deleted.append(public_id)
         self.files.pop(public_id, None)
 
+    def download_url(self, public_id, file_name, expires_in=3600):
+        return f"https://storage.test/{public_id}?name={file_name}", 1_900_000_000
+
 
 @pytest.fixture(autouse=True)
 def fake_storage(monkeypatch):
@@ -33,4 +36,5 @@ def fake_storage(monkeypatch):
     fake = FakeStorage()
     monkeypatch.setattr(file_storage, "store_private", fake.store_private)
     monkeypatch.setattr(file_storage, "delete", fake.delete)
+    monkeypatch.setattr(file_storage, "download_url", fake.download_url)
     return fake

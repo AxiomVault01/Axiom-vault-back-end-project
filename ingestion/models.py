@@ -137,3 +137,26 @@ class Payment(models.Model):
     def __str__(self):
         return f"{self.transaction_id}: {self.amount} to {self.vendor_id}"
 
+
+
+class StoredFile(models.Model):
+    """Any file a member uploaded (case evidence and other attachments), kept privately on Cloudinary."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organisation = models.ForeignKey(Organisation, on_delete=models.PROTECT, related_name="stored_files")
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    file_name = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=100)
+    size = models.PositiveIntegerField(help_text="Size in bytes.")
+    # Private Cloudinary id; never returned by the API.
+    public_id = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "stored_files"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.file_name
