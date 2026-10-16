@@ -4,6 +4,9 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from config.file_storage import StorageUnavailable
+from ingestion.file_viewsets import StoredFileSerializer, describe
+
 from .models import Case, CaseComment, CaseEvent
 from .serializers import NOTE_MAX_LENGTH, ActorSerializer, AlertListSerializer, PersonSerializer
 
@@ -11,6 +14,7 @@ CASE_STATUS_VALUES = [value for value, _ in Case.STATUS_CHOICES]
 PRIORITY_VALUES = [value for value, _ in Case.PRIORITY_CHOICES]
 REASON_VALUES = [value for value, _ in Case.ESCALATION_REASON_CHOICES]
 MAX_ALERTS_PER_CASE = 20
+MAX_ESCALATION_DOCUMENTS = 10
 
 
 def person(user):
@@ -19,6 +23,33 @@ def person(user):
 
 def actor(user):
     return {"id": str(user.id), "full_name": user.full_name} if user else None
+
+
+def evidence_item(evidence):
+    """One row of the Evidence box. The link is `null` if storage can't be reached, so the page still loads."""
+    try:
+        file = describe(evidence.file)
+    except StorageUnavailable:
+        file = describe(evidence.file, link=False)
+    return {
+        "id": str(evidence.id),
+        "source": evidence.source,
+        "file": file,
+        "added_by": actor(evidence.added_by),
+        "added_at": evidence.created_at,
+    }
+
+
+class CaseEvidenceSerializer(serializers.Serializer):
+    id = serializers.UUIDField(help_text="The evidence entry's ID; use it to remove the evidence.")
+    source = serializers.CharField(help_text="`evidence` (Evidence box) or `escalation` (an escalation supporting document).")
+    file = StoredFileSerializer(help_text="The attached file, with a download link valid for 1 hour.")
+    added_by = ActorSerializer(allow_null=True, help_text="`{id, full_name}` of who attached it, or `null` if removed.")
+    added_at = serializers.DateTimeField(help_text="When it was attached (ISO 8601).")
+
+
+class EvidenceCreateSerializer(serializers.Serializer):
+    file_id = serializers.UUIDField(help_text="ID returned by `POST /api/v1/files/`. Must be a file of your organisation.")
 
 
 class EmployeeSerializer(serializers.Serializer):
@@ -52,6 +83,7 @@ class CaseListSerializer(serializers.ModelSerializer):
     reference = serializers.CharField(read_only=True, help_text="Readable ID, e.g. `CASE-0001`. Use it in every case URL.")
     investigator = serializers.SerializerMethodField(help_text="`{id, full_name, email}` of the investigator, or `null`.")
     alerts_count = serializers.SerializerMethodField(help_text="How many alerts the case links.")
+    evidence_count = serializers.SerializerMethodField(help_text="How many evidence files are attached (Evidence column).")
     sla_due_at = serializers.DateTimeField(read_only=True, help_text="When the SLA runs out: created + 2 (critical), 5 (high), 7 (medium), or 14 (low) days.")
     sla_days_remaining = serializers.SerializerMethodField(
         help_text="Whole days left, rounded up (\"2 days remaining\"); 0 or negative when overdue; `null` once closed."
@@ -61,7 +93,7 @@ class CaseListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Case
         fields = [
-            "reference", "title", "status", "priority", "investigator", "alerts_count", "sla_due_at",
+            "reference", "title", "status", "priority", "investigator", "alerts_count", "evidence_count", "sla_due_at",
             "sla_days_remaining", "days_open", "created_at", "updated_at",
         ]
         read_only_fields = fields
@@ -81,6 +113,11 @@ class CaseListSerializer(serializers.ModelSerializer):
     def get_alerts_count(self, case):
         count = getattr(case, "alerts_count", None)
         return case.alerts.count() if count is None else count
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_evidence_count(self, case):
+        count = getattr(case, "evidence_count", None)
+        return case.evidence.count() if count is None else count
 
     @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_sla_days_remaining(self, case):
@@ -257,6 +294,11 @@ class CaseEscalateSerializer(serializers.Serializer):
     escalate_to_id = serializers.UUIDField(help_text="ID of an active member of your organisation (super admin or team member).")
     priority = serializers.ChoiceField(choices=PRIORITY_VALUES, help_text="Priority level: `critical`, `high`, `medium`, or `low`.")
     notes = serializers.CharField(required=False, allow_blank=True, max_length=NOTE_MAX_LENGTH, help_text="Escalation notes, up to 2000 characters.")
+    document_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, max_length=MAX_ESCALATION_DOCUMENTS,
+        help_text=f"Optional supporting documents: up to {MAX_ESCALATION_DOCUMENTS} IDs from `POST /api/v1/files/`, each a "
+        "CSV, XLS, or XLSX file (at most 10 MB). They are attached to the case as evidence with `source: \"escalation\"`.",
+    )
 
 
 class CaseListFilterSerializer(serializers.Serializer):

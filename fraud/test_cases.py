@@ -205,7 +205,7 @@ def test_list_filters_and_search(owner, member, org, outsider):
     assert refs(search="phantom") == ["CASE-0001"]
     assert refs(search="Alert 2") == ["CASE-0002"]
     row = client.get(CASES).json()["results"][0]
-    assert set(row) == {"reference", "title", "status", "priority", "investigator", "alerts_count", "sla_due_at", "sla_days_remaining", "days_open", "created_at", "updated_at"}
+    assert set(row) == {"reference", "title", "status", "priority", "investigator", "alerts_count", "evidence_count", "sla_due_at", "sla_days_remaining", "days_open", "created_at", "updated_at"}
     assert row["sla_days_remaining"] is None  # Closed.
 
 

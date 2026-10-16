@@ -208,6 +208,8 @@ class CaseEvent(models.Model):
     REVIEWER_REMOVED = "reviewer_removed"
     COMMENT_ADDED = "comment_added"
     ESCALATED = "escalated"
+    EVIDENCE_ADDED = "evidence_added"
+    EVIDENCE_REMOVED = "evidence_removed"
     TYPE_CHOICES = [
         (CREATED, "Case created"),
         (STATUS_CHANGED, "Status changed"),
@@ -217,6 +219,8 @@ class CaseEvent(models.Model):
         (REVIEWER_REMOVED, "Reviewer removed"),
         (COMMENT_ADDED, "Comment added"),
         (ESCALATED, "Escalated"),
+        (EVIDENCE_ADDED, "Evidence added"),
+        (EVIDENCE_REMOVED, "Evidence removed"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -246,3 +250,23 @@ class CaseComment(models.Model):
         db_table = "case_comments"
         ordering = ["-created_at"]
 
+
+
+class CaseEvidence(models.Model):
+    """A stored file (feature 31) attached to a case as evidence or as an escalation document."""
+
+    EVIDENCE = "evidence"
+    ESCALATION = "escalation"
+    SOURCE_CHOICES = [(EVIDENCE, "Evidence"), (ESCALATION, "Escalation supporting document")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    case = models.ForeignKey(Case, on_delete=models.CASCADE, related_name="evidence")
+    file = models.ForeignKey("ingestion.StoredFile", on_delete=models.PROTECT, related_name="case_evidence")
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default=EVIDENCE)
+    added_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "case_evidence"
+        ordering = ["-created_at"]
+        constraints = [models.UniqueConstraint(fields=["case", "file"], name="unique_file_per_case")]

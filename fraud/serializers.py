@@ -60,7 +60,7 @@ class AlertDetailSerializer(AlertListSerializer):
     """Everything the Alert detail screen shows."""
 
     upload = serializers.SerializerMethodField(help_text="The upload that triggered the alert, or `null`.")
-    evidence = serializers.SerializerMethodField(help_text="Evidence files. Always `[]` until evidence uploads exist.")
+    evidence = serializers.SerializerMethodField(help_text="Evidence files of the case this alert is in, newest first; `[]` when it is in no case.")
     notes_count = serializers.SerializerMethodField(help_text="How many notes the alert has.")
     case = serializers.SerializerMethodField(help_text="Reference of the case investigating it (`CASE-0001`), or `null`.")
 
@@ -93,7 +93,11 @@ class AlertDetailSerializer(AlertListSerializer):
 
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
     def get_evidence(self, alert):
-        return []
+        if not alert.case_id:
+            return []
+        from .case_serializers import evidence_item  # Imported here: case_serializers imports this module.
+
+        return [evidence_item(e) for e in alert.case.evidence.select_related("file__uploaded_by", "added_by")]
 
     @extend_schema_field(serializers.IntegerField())
     def get_notes_count(self, alert):
