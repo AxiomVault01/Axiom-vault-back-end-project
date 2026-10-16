@@ -193,7 +193,7 @@ class AlertViewSet(viewsets.GenericViewSet):
         description=(
             "**Alert detail screen.** Everything about one alert: the explanation (\"Why This Was Flagged\"), "
             "flagged records, event timeline, assigned reviewer, the upload that triggered it, and reserved AI "
-            "fields (empty until ML fills them). `evidence` is always `[]` until evidence uploads exist. Amounts in "
+            "fields (empty until ML fills them). `evidence` lists the files attached to the alert's case (`[]` when it is in no case), each with a 1-hour download link. Amounts in "
             "`flagged_records` are text with 2 decimals in `currency` (NGN).\n\n" + AUTH_NOTE
         ),
         parameters=[REFERENCE_PARAM],

@@ -40,13 +40,17 @@ class StoredFileSerializer(serializers.Serializer):
     size = serializers.IntegerField(help_text="Size in bytes.")
     uploaded_by = UploaderSerializer(allow_null=True, help_text="Who uploaded it, or `null` if that account was removed.")
     created_at = serializers.DateTimeField(help_text="When it was uploaded (ISO 8601).")
-    url = serializers.URLField(help_text="Signed link that downloads the file. Works for 1 hour; read the file again for a new one.")
-    url_expires_at = serializers.DateTimeField(help_text="When `url` stops working (ISO 8601).")
+    url = serializers.URLField(
+        allow_null=True,
+        help_text="Signed link that downloads the file. Works for 1 hour; read the file again for a new one. "
+        "`null` only inside case evidence lists when storage is unreachable.",
+    )
+    url_expires_at = serializers.DateTimeField(allow_null=True, help_text="When `url` stops working (ISO 8601), or `null` with `url`.")
 
 
-def describe(stored):
-    """The API shape of a stored file, with a fresh download link."""
-    url, expires_at = file_storage.download_url(stored.public_id, stored.file_name)
+def describe(stored, link=True):
+    """The API shape of a stored file, with a fresh download link (or `null` link when `link` is false)."""
+    url, expires_at = file_storage.download_url(stored.public_id, stored.file_name) if link else (None, None)
     uploader = stored.uploaded_by
     return {
         "id": str(stored.id),
@@ -56,7 +60,7 @@ def describe(stored):
         "uploaded_by": {"id": str(uploader.id), "full_name": uploader.full_name} if uploader else None,
         "created_at": stored.created_at,
         "url": url,
-        "url_expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc),
+        "url_expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc) if expires_at else None,
     }
 
 

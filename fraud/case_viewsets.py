@@ -1,4 +1,5 @@
 import re
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -14,6 +15,7 @@ from rest_framework.response import Response
 
 from accounts.models import AuditLog, Organisation
 from accounts.permissions import PasswordChangeNotRequired
+from ingestion.models import StoredFile
 from ingestion.viewsets import BelongsToOrganisation
 
 from .case_serializers import (
@@ -23,11 +25,14 @@ from .case_serializers import (
     CaseDetailSerializer,
     CaseEscalateSerializer,
     CaseEventSerializer,
+    CaseEvidenceSerializer,
     CaseListFilterSerializer,
     CaseListSerializer,
     CaseStatusSerializer,
+    EvidenceCreateSerializer,
+    evidence_item,
 )
-from .models import Alert, AlertEvent, Case, CaseComment, CaseEvent
+from .models import Alert, AlertEvent, Case, CaseComment, CaseEvent, CaseEvidence
 from .viewsets import ALERT_EXAMPLE, FORBIDDEN, PAGINATION_NOTE, REFERENCE_PATTERN, REVIEWER_INVALID_MESSAGE, UNAUTHORIZED, paged
 
 User = get_user_model()
@@ -35,6 +40,9 @@ CASE_REFERENCE_PATTERN = re.compile(r"CASE-(\d{4,})", re.IGNORECASE)
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 ESCALATE_INSTEAD_MESSAGE = "Use the escalate endpoint to escalate a case."
 CLOSED_CASE_MESSAGE = "A closed case cannot be escalated. Reopen it first."
+UNKNOWN_FILE_MESSAGE = "No file with this ID in your organisation."
+DOCUMENT_TYPE_MESSAGE = "Supporting documents must be CSV, XLS, or XLSX files."
+DOCUMENT_EXTENSIONS = (".csv", ".xls", ".xlsx")
 
 AUTH_NOTE = (
     "**Authentication:** `Authorization: Bearer <access_token>` of any member of the organisation (super admin "
@@ -54,6 +62,7 @@ CASE_EXAMPLE = {
     "priority": "high",
     "investigator": PERSON,
     "alerts_count": 1,
+    "evidence_count": 1,
     "sla_due_at": "2026-10-20T09:00:00Z",
     "sla_days_remaining": 5,
     "days_open": 0,
@@ -93,6 +102,18 @@ ESCALATED_EXAMPLE = {
     },
 }
 COMMENT_EXAMPLE = {"id": "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e", "text": "Bank statement requested from GTBank.", "author": ACTOR, "created_at": "2026-10-15T10:00:00Z"}
+EVIDENCE_EXAMPLE = {
+    "id": "8c7d6e5f-4a3b-4c2d-9e1f-0a9b8c7d6e5f",
+    "source": "evidence",
+    "file": {
+        "id": "3f2b9c1e-8a4d-4e6f-9b2c-7d1e5a8f0c3b", "file_name": "gtbank-statement-oct.pdf", "content_type": "application/pdf",
+        "size": 248133, "uploaded_by": ACTOR, "created_at": "2026-10-15T10:00:00Z",
+        "url": "https://api.cloudinary.com/v1_1/<cloud>/raw/download?api_key=…&attachment=1&expires_at=1792080000&signature=…",
+        "url_expires_at": "2026-10-15T11:00:00Z",
+    },
+    "added_by": ACTOR,
+    "added_at": "2026-10-15T10:01:00Z",
+}
 
 NOT_FOUND = OpenApiResponse(
     response=OpenApiTypes.OBJECT,
@@ -123,7 +144,8 @@ class CaseViewSet(viewsets.GenericViewSet):
         return (
             Case.objects.filter(organisation=self.request.user.organisation)
             .select_related("investigator", "reviewer", "created_by", "escalated_to")
-            .annotate(alerts_count=Count("alerts"))
+            # distinct: two counts over different joins would otherwise multiply each other.
+            .annotate(alerts_count=Count("alerts", distinct=True), evidence_count=Count("evidence", distinct=True))
             .order_by("-created_at", "-number")  # GROUP BY drops the model ordering.
         )
 
@@ -509,6 +531,122 @@ class CaseViewSet(viewsets.GenericViewSet):
 
     @extend_schema(
         tags=["Cases"],
+        summary="List a case's evidence",
+        description=(
+            "**Evidence box** (Case detail screen): the files attached to the case, newest first, with name, size, "
+            "type, who uploaded the file, who attached it and when, and a download `url` valid for 1 hour "
+            "(`url_expires_at`). Escalation supporting documents appear here too, with `source: \"escalation\"`. "
+            "If storage is unreachable the list still loads, with `url: null`.\n\n" + PAGINATION_NOTE + "\n\n" + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        methods=["GET"],
+        responses={
+            200: OpenApiResponse(response=CaseEvidenceSerializer(many=True), examples=[OpenApiExample("Evidence", value=paged([EVIDENCE_EXAMPLE]))]),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @extend_schema(
+        tags=["Cases"],
+        summary="Attach evidence to a case",
+        description=(
+            "**Upload Evidence** (Case detail screen) takes two calls:\n"
+            "1. `POST /api/v1/files/` with the file (any type, at most 10 MB) returns its `id`.\n"
+            "2. This endpoint with `{\"file_id\": \"<that id>\"}` attaches it to the case.\n\n"
+            "The file must belong to your organisation. A file can be attached to a case only once (attaching it "
+            "to another case is fine). Evidence can be added in any case status. 201 returns the evidence entry. "
+            "Recorded in the case history (`evidence_added`) and the audit log.\n\n" + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        methods=["POST"],
+        request=EvidenceCreateSerializer,
+        examples=[OpenApiExample("Attach", value={"file_id": "3f2b9c1e-8a4d-4e6f-9b2c-7d1e5a8f0c3b"}, request_only=True)],
+        responses={
+            201: OpenApiResponse(response=CaseEvidenceSerializer, examples=[OpenApiExample("Attached", value=EVIDENCE_EXAMPLE)]),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                examples=[
+                    OpenApiExample("Unknown file", value={"file_id": [UNKNOWN_FILE_MESSAGE]}),
+                    OpenApiExample("Already attached", value={"file_id": ["This file is already evidence on CASE-0001."]}),
+                    OpenApiExample("Not an ID", value={"file_id": ["Must be a valid UUID."]}),
+                ],
+            ),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @action(detail=True, methods=["get", "post"])
+    def evidence(self, request, reference=None):
+        case = self.get_object()
+        if request.method == "GET":
+            page = self.paginate_queryset(case.evidence.select_related("file__uploaded_by", "added_by"))
+            return self.get_paginated_response([evidence_item(e) for e in page])
+        serializer = EvidenceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        stored = self._files(request, [serializer.validated_data["file_id"]], "file_id")[0]
+        if case.evidence.filter(file=stored).exists():
+            raise serializers.ValidationError({"file_id": [f"This file is already evidence on {case.reference}."]})
+        with transaction.atomic():
+            item = self._attach(case, stored, CaseEvidence.EVIDENCE, request)
+        return Response(evidence_item(item), status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _files(request, file_ids, field):
+        """The organisation's stored files for these IDs, in order; 400 on `field` if any is not found."""
+        found = {f.pk: f for f in StoredFile.objects.filter(pk__in=file_ids, organisation=request.user.organisation).select_related("uploaded_by")}
+        if any(file_id not in found for file_id in file_ids):
+            raise serializers.ValidationError({field: [UNKNOWN_FILE_MESSAGE]})
+        return [found[file_id] for file_id in dict.fromkeys(file_ids)]
+
+    @staticmethod
+    def _attach(case, stored, source, request):
+        item = CaseEvidence.objects.create(case=case, file=stored, source=source, added_by=request.user)
+        CaseEvent.objects.create(case=case, type=CaseEvent.EVIDENCE_ADDED, actor=request.user, detail=stored.file_name)
+        Case.objects.filter(pk=case.pk).update(updated_at=timezone.now())
+        AuditLog.record(
+            AuditLog.CASE_EVIDENCE_ADDED, actor=request.user, target=case, request=request,
+            details={"reference": case.reference, "file_id": str(stored.pk), "file_name": stored.file_name, "source": source},
+        )
+        return item
+
+    @extend_schema(
+        tags=["Cases"],
+        summary="Remove evidence from a case",
+        description=(
+            "**Remove** on an evidence row. Detaches the file from the case (204, no body). The stored file itself is "
+            "kept, so the audit trail can still show what was attached. The removal is recorded in the case history "
+            "(`evidence_removed`) and the audit log. Escalation documents are removed the same way.\n\n"
+            "404 when the case or the evidence entry is not found in your organisation.\n\n" + AUTH_NOTE
+        ),
+        parameters=[
+            REFERENCE_PARAM,
+            OpenApiParameter("evidence_id", OpenApiTypes.UUID, OpenApiParameter.PATH, description="The evidence entry's `id` (not the file's)."),
+        ],
+        responses={
+            204: OpenApiResponse(description="Removed."),
+            401: UNAUTHORIZED, 403: FORBIDDEN,
+            404: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Not found", value={"detail": "No evidence with this ID on this case."})]),
+        },
+    )
+    @action(detail=True, methods=["delete"], url_path=r"evidence/(?P<evidence_id>[^/.]+)")
+    def remove_evidence(self, request, reference=None, evidence_id=None):
+        case = self.get_object()
+        try:
+            item = case.evidence.select_related("file").filter(pk=uuid.UUID(evidence_id)).first()
+        except ValueError:
+            item = None
+        if item is None:
+            raise Http404("No evidence with this ID on this case.")
+        with transaction.atomic():
+            item.delete()
+            CaseEvent.objects.create(case=case, type=CaseEvent.EVIDENCE_REMOVED, actor=request.user, detail=item.file.file_name)
+            Case.objects.filter(pk=case.pk).update(updated_at=timezone.now())
+            AuditLog.record(
+                AuditLog.CASE_EVIDENCE_REMOVED, actor=request.user, target=case, request=request,
+                details={"reference": case.reference, "file_id": str(item.file_id), "file_name": item.file.file_name},
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @extend_schema(
+        tags=["Cases"],
         summary="Escalate a case",
         description=(
             "**Escalate Case screen** (`/investigations/escalate`). Moves the case to `escalated` and records why "
@@ -520,8 +658,12 @@ class CaseViewSet(viewsets.GenericViewSet):
             "- `escalate_to_id` (required): an active member of your organisation (super admin or team member)\n"
             "- `priority` (required): `critical`, `high`, `medium`, `low`; becomes the case priority and moves the "
             "SLA due date\n"
-            "- `notes` (optional, up to 2000)\n\n"
-            "Supporting documents are attached through evidence uploads, added by a later feature.\n\n"
+            "- `notes` (optional, up to 2000)\n"
+            "- `document_ids` (optional): supporting documents, up to 10. Upload each first with "
+            "`POST /api/v1/files/` and send the returned IDs. Each must be a CSV, XLS, or XLSX file of your "
+            "organisation. They are attached to the case as evidence with `source: \"escalation\"` (already attached "
+            "files are kept as they are).\n\n"
+            "If any field is invalid, nothing changes.\n\n"
             "A case can be escalated again (for example to someone else); the latest escalation is shown in "
             "`escalation`. A closed case is 400: reopen it first. 200 returns the updated case; show \"Case "
             "successfully escalated\". Recorded in the history (`escalated`) and the audit log.\n\n" + AUTH_NOTE
@@ -534,6 +676,14 @@ class CaseViewSet(viewsets.GenericViewSet):
                 value={"reason": "financial_threshold", "escalate_to_id": "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d", "priority": "critical", "notes": "Above the 1,000,000 NGN approval limit."},
                 request_only=True,
             ),
+            OpenApiExample(
+                "Escalate with supporting documents",
+                value={
+                    "reason": "complex_fraud", "escalate_to_id": "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d", "priority": "high",
+                    "notes": "Payment run attached.", "document_ids": ["3f2b9c1e-8a4d-4e6f-9b2c-7d1e5a8f0c3b"],
+                },
+                request_only=True,
+            ),
         ],
         responses={
             200: OpenApiResponse(response=CaseDetailSerializer, examples=[OpenApiExample("Escalated", value=ESCALATED_EXAMPLE)]),
@@ -543,6 +693,8 @@ class CaseViewSet(viewsets.GenericViewSet):
                     OpenApiExample("Closed case", value={"status": [CLOSED_CASE_MESSAGE]}),
                     OpenApiExample("Unknown reason", value={"reason": ['"budget" is not a valid choice.']}),
                     OpenApiExample("Not a member", value={"escalate_to_id": [REVIEWER_INVALID_MESSAGE]}),
+                    OpenApiExample("Wrong document type", value={"document_ids": [DOCUMENT_TYPE_MESSAGE]}),
+                    OpenApiExample("Unknown document", value={"document_ids": [UNKNOWN_FILE_MESSAGE]}),
                     OpenApiExample("Missing fields", value={"reason": ["This field is required."], "escalate_to_id": ["This field is required."], "priority": ["This field is required."]}),
                 ],
             ),
@@ -560,8 +712,15 @@ class CaseViewSet(viewsets.GenericViewSet):
         person = _member(request.user.organisation, data["escalate_to_id"])
         if person is None:
             raise serializers.ValidationError({"escalate_to_id": [REVIEWER_INVALID_MESSAGE]})
+        documents = self._files(request, data.get("document_ids", []), "document_ids")
+        if any(not d.file_name.lower().endswith(DOCUMENT_EXTENSIONS) for d in documents):
+            raise serializers.ValidationError({"document_ids": [DOCUMENT_TYPE_MESSAGE]})
         old_status = case.status
         with transaction.atomic():
+            attached = set(case.evidence.values_list("file_id", flat=True))
+            for document in documents:
+                if document.pk not in attached:
+                    self._attach(case, document, CaseEvidence.ESCALATION, request)
             case.status = "escalated"
             case.priority = data["priority"]
             case.escalation_reason = data["reason"]
@@ -575,6 +734,9 @@ class CaseViewSet(viewsets.GenericViewSet):
             )
             AuditLog.record(
                 AuditLog.CASE_ESCALATED, actor=request.user, target=case, request=request,
-                details={"reference": case.reference, "reason": case.escalation_reason, "escalated_to": str(person.pk), "priority": case.priority},
+                details={
+                    "reference": case.reference, "reason": case.escalation_reason, "escalated_to": str(person.pk),
+                    "priority": case.priority, "documents": [str(d.pk) for d in documents],
+                },
             )
-        return self._detail(case)
+        return self._detail(self.get_queryset().get(pk=case.pk))  # Fresh counts after attaching documents.

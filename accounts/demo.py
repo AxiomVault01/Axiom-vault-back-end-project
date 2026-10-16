@@ -15,7 +15,8 @@ from django.utils import timezone
 from accounts.models import AuditLog, Organisation
 from fraud.models import Alert, AlertEvent, AlertNote, Case, CaseComment, CaseEvent
 from fraud.services.detection import run_detection
-from ingestion.models import DataUpload, Payment, Payroll, Vendor
+from config import file_storage
+from ingestion.models import DataUpload, Payment, Payroll, StoredFile, Vendor
 
 User = get_user_model()
 
@@ -225,6 +226,7 @@ def demo_counts() -> dict:
         "organisations": orgs.count(),
         "users": User.objects.filter(organisation__in=orgs).count(),
         "uploads": DataUpload.objects.filter(organisation__in=orgs).count(),
+        "stored files": StoredFile.objects.filter(organisation__in=orgs).count(),
         "payroll rows": Payroll.objects.filter(organisation__in=orgs).count(),
         "vendors": Vendor.objects.filter(organisation__in=orgs).count(),
         "payments": Payment.objects.filter(organisation__in=orgs).count(),
@@ -243,7 +245,13 @@ def clear() -> dict:
         Alert.objects.filter(organisation__in=orgs).delete()  # Events and notes go with them (cascade).
         for model in (Payroll, Vendor, Payment):
             model.objects.filter(organisation__in=orgs).delete()
-        DataUpload.objects.filter(organisation__in=orgs).delete()
+        uploads = DataUpload.objects.filter(organisation__in=orgs)
+        files = StoredFile.objects.filter(organisation__in=orgs)
+        stored = [*uploads.exclude(source_public_id="").values_list("source_public_id", flat=True), *files.values_list("public_id", flat=True)]
+        uploads.delete()
+        files.delete()  # After cases, whose evidence protects them.
+        # Remove the files from storage only once the rows are really gone.
+        transaction.on_commit(lambda: [file_storage.delete(public_id) for public_id in stored])
         # Audit rows refuse deletes on purpose; demo rows are the one sanctioned exception.
         models.QuerySet(AuditLog).filter(organisation__in=orgs).delete()
         users = User.objects.filter(organisation__in=orgs)
