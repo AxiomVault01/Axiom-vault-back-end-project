@@ -40,14 +40,34 @@ def store_private(data: bytes, public_id: str) -> dict:
     return {"public_id": result["public_id"], "bytes": result.get("bytes", len(data))}
 
 
-def delete(public_id: str) -> None:
-    """Removes a stored file. Failures are logged, not raised: this is cleanup."""
+def store_public_image(data: bytes, public_id: str) -> dict:
+    """Uploads a public image (profile pictures). Returns {"public_id", "url"}.
+
+    Public means anyone with the URL can view it, which `<img src>` needs; the id is random so it can't be guessed.
+    """
+    if not is_configured():
+        raise StorageUnavailable("CLOUDINARY_URL is not set")
+    try:
+        import cloudinary.uploader
+
+        result = cloudinary.uploader.upload(data, public_id=public_id, resource_type="image", type="upload", overwrite=False)
+    except Exception as exc:
+        logger.warning("Cloudinary image upload failed for %s: %s", public_id, type(exc).__name__)
+        raise StorageUnavailable("Cloudinary upload failed") from exc
+    return {"public_id": result["public_id"], "url": result["secure_url"]}
+
+
+def delete(public_id: str, image: bool = False) -> None:
+    """Removes a stored file (a public image when `image`). Failures are logged, not raised: this is cleanup."""
     if not public_id or not is_configured():
         return
     try:
         import cloudinary.uploader
 
-        cloudinary.uploader.destroy(public_id, resource_type="raw", type="authenticated", invalidate=True)
+        if image:
+            cloudinary.uploader.destroy(public_id, resource_type="image", type="upload", invalidate=True)
+        else:
+            cloudinary.uploader.destroy(public_id, resource_type="raw", type="authenticated", invalidate=True)
     except Exception as exc:
         logger.warning("Cloudinary delete failed for %s: %s", public_id, type(exc).__name__)
 

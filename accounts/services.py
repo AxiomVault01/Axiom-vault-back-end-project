@@ -418,6 +418,7 @@ class AuthService:
                 "role": user.role,
                 "account_type": user.account_type,
                 "must_change_password": user.must_change_password,
+                "profile_picture": user.profile_picture_url or None,
             },
         }
 

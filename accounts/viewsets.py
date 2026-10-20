@@ -94,6 +94,11 @@ LoginUserSchema = inline_serializer(
             "gave them. Show the change-password screen: every other endpoint answers 403 until it "
             "is changed.",
         ),
+        "profile_picture": serializers.URLField(
+            allow_null=True,
+            help_text="Public URL of the user's picture for `<img src>`, or `null` (show initials). Set with "
+            "`PUT /api/v1/me/picture/`.",
+        ),
     },
 )
 LoginResponse = inline_serializer(
@@ -527,6 +532,7 @@ class AuthViewSet(viewsets.ViewSet):
                                 "role": "",
                                 "account_type": "super_admin",
                                 "must_change_password": False,
+                                "profile_picture": None,
                             },
                         },
                     )

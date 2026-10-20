@@ -43,6 +43,9 @@ class User(AbstractUser):
     phone_number = models.CharField(max_length=20, blank=True, default="")
     # Set for a team member's temporary password; cleared by change or reset password.
     must_change_password = models.BooleanField(default=False)
+    # Public Cloudinary image under an unguessable id; empty when the user has none (feature 32).
+    profile_picture_url = models.URLField(max_length=500, blank=True, default="")
+    profile_picture_public_id = models.CharField(max_length=255, blank=True, default="")
 
     SUPER_ADMIN = "super_admin"
     TEAM_MEMBER = "team_member"
@@ -167,6 +170,8 @@ class AuditLog(models.Model):
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
     FILE_UPLOADED = "file_uploaded"
+    PROFILE_PICTURE_UPDATED = "profile_picture_updated"
+    PROFILE_PICTURE_REMOVED = "profile_picture_removed"
     ALERT_CREATED = "alert_created"
     ALERT_STATUS_CHANGED = "alert_status_changed"
     ALERT_REVIEWER_CHANGED = "alert_reviewer_changed"
@@ -192,6 +197,8 @@ class AuditLog(models.Model):
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
         (FILE_UPLOADED, "Uploaded a file"),
+        (PROFILE_PICTURE_UPDATED, "Changed their profile picture"),
+        (PROFILE_PICTURE_REMOVED, "Removed their profile picture"),
         (ALERT_CREATED, "Detection opened an alert"),
         (ALERT_STATUS_CHANGED, "Changed an alert's status"),
         (ALERT_REVIEWER_CHANGED, "Changed an alert's reviewer"),

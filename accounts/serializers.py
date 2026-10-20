@@ -148,9 +148,11 @@ def clean_phone_number(value: str) -> str:
 class TeamMemberSerializer(serializers.ModelSerializer):
     """A team member as the super admin sees them."""
 
+    profile_picture = serializers.SerializerMethodField(help_text="Public URL of the member's picture, or `null` (show initials).")
+
     class Meta:
         model = User
-        fields = ["id", "full_name", "email", "phone_number", "role", "is_active", "must_change_password", "date_joined"]
+        fields = ["id", "full_name", "email", "phone_number", "role", "is_active", "must_change_password", "profile_picture", "date_joined"]
         read_only_fields = fields
         extra_kwargs = {
             "id": {"help_text": "The member's permanent ID; use it in the detail, edit, and (de)activate URLs."},
@@ -164,6 +166,9 @@ class TeamMemberSerializer(serializers.ModelSerializer):
             },
             "date_joined": {"help_text": "When the super admin added the member (ISO 8601)."},
         }
+
+    def get_profile_picture(self, member) -> str | None:
+        return member.profile_picture_url or None
 
 
 class TeamMemberCreateSerializer(serializers.Serializer):
