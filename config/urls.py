@@ -16,6 +16,9 @@ urlpatterns = [
     # Team management (organisation super admin)
     path("api/v1/team/", include("accounts.team_urls")),
 
+    # The logged-in user's own account (profile picture; profile in feature 17)
+    path("api/v1/me/", include("accounts.me_urls")),
+
     # Fraud Detection
     path("api/v1/fraud/", include("fraud.urls")),
 

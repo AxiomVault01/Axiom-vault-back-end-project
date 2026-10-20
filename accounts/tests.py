@@ -728,6 +728,7 @@ def test_login_returns_tokens_and_profile():
         "role": "fraud_analyst",
         "account_type": "super_admin",
         "must_change_password": False,
+        "profile_picture": None,
     }
     user.refresh_from_db()
     assert user.last_login is not None
@@ -2171,7 +2172,7 @@ def test_super_admin_adds_a_team_member(api_client, super_admin):
     assert response.status_code == 201
     body = response.json()
     assert set(body) == {
-        "id", "full_name", "email", "phone_number", "role", "is_active", "must_change_password", "date_joined"
+        "id", "full_name", "email", "phone_number", "role", "is_active", "must_change_password", "profile_picture", "date_joined"
     }
     assert body["email"] == "ada.obi@ikejacoop.ng"
     assert body["phone_number"] == "+2348012345678"
