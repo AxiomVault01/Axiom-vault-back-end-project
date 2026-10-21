@@ -1,4 +1,4 @@
-"""The logged-in user's own account: profile picture (feature 32); the profile itself comes with feature 17."""
+"""The logged-in user's own account: profile (feature 17) and profile picture (feature 32)."""
 
 import io
 import secrets
@@ -17,6 +17,7 @@ from config.file_storage import StorageUnavailable
 
 from .models import AuditLog
 from .permissions import PASSWORD_CHANGE_REQUIRED_MESSAGE
+from .serializers import PHONE_NUMBER_MESSAGE, ProfileSerializer, ProfileUpdateSerializer
 
 MAX_PICTURE_BYTES = 2 * 1024 * 1024
 PICTURE_FORMATS = {"JPEG", "PNG", "WEBP"}
@@ -60,10 +61,85 @@ def picture_format(data: bytes):
         return None
 
 
+PROFILE_EXAMPLE = {
+    "id": "2d089ad3-9545-4611-a9dc-731c3a81879f",
+    "email": "ngozi@ikejacoop.ng",
+    "full_name": "Ngozi Okafor",
+    "department": "internal_audit",
+    "phone_number": "+2348031234567",
+    "role": "",
+    "account_type": "super_admin",
+    "organisation": {"id": "b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d", "name": "Ikeja Cooperative"},
+    "profile_picture": PICTURE_URL,
+    "is_staff": False,
+    "date_joined": "2026-10-01T09:00:00Z",
+    "last_login": "2026-10-20T08:15:00Z",
+}
+PROFILE_NOTE = (
+    "**Editable here:** `full_name`, `department`, `phone_number`. **Read-only:** `email`, `role`, "
+    "`account_type`, `organisation` (a super admin changes a member's email and role on the Team screen; AxiomVault "
+    "staff manage organisations), `is_staff`, dates. The picture has its own endpoint, `PUT /api/v1/me/picture/`, "
+    "and the password `POST /api/v1/auth/change-password/`."
+)
+
+
 class MeViewSet(viewsets.ViewSet):
     """Endpoints about the caller's own account."""
 
-    parser_classes = [MultiPartParser, FormParser]
+    @extend_schema(
+        tags=["My account"],
+        summary="My profile",
+        description=(
+            "**Profile screen.** The logged-in user's own profile: name, email, department, phone, job title, account "
+            "type, Cooperative, picture, and dates. Works for super admins, team members, and AxiomVault staff "
+            "(`organisation` and `account_type` are empty for staff).\n\n" + PROFILE_NOTE + "\n\n" + AUTH_NOTE
+        ),
+        responses={200: OpenApiResponse(response=ProfileSerializer, examples=[OpenApiExample("Profile", value=PROFILE_EXAMPLE)]), 401: UNAUTHORIZED, 403: FORBIDDEN},
+    )
+    def retrieve_profile(self, request):
+        return Response(ProfileSerializer(request.user).data)
+
+    @extend_schema(
+        tags=["My account"],
+        summary="Edit my profile",
+        description=(
+            "**Save on the Profile screen.** Changes only the fields sent, all optional:\n"
+            "- `full_name`: 1 to 255 characters, spaces trimmed\n"
+            "- `department`: `internal_audit`, `finance`, `compliance`, `risk_management`, `human_resources`, `others`\n"
+            "- `phone_number`: 7 to 15 digits with an optional leading `+`; spaces and hyphens are removed; `\"\"` "
+            "clears it\n\n"
+            "Any other key (for example `email` or `role`) is ignored, never an error. 200 returns the whole updated "
+            "profile; update the name shown in the header from it. Changes are recorded in the audit log.\n\n"
+            + PROFILE_NOTE + "\n\n" + AUTH_NOTE
+        ),
+        request=ProfileUpdateSerializer,
+        examples=[OpenApiExample("Edit", value={"full_name": "Ngozi A. Okafor", "department": "compliance", "phone_number": "+234 803 123 4567"}, request_only=True)],
+        responses={
+            200: OpenApiResponse(response=ProfileSerializer, examples=[OpenApiExample("Updated", value={**PROFILE_EXAMPLE, "full_name": "Ngozi A. Okafor", "department": "compliance"})]),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                examples=[
+                    OpenApiExample("Blank name", value={"full_name": ["This field may not be blank."]}),
+                    OpenApiExample("Unknown department", value={"department": ['"sales" is not a valid choice.']}),
+                    OpenApiExample("Bad phone", value={"phone_number": [PHONE_NUMBER_MESSAGE]}),
+                ],
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+        },
+    )
+    def update_profile(self, request):
+        serializer = ProfileUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        changed = [name for name, value in serializer.validated_data.items() if getattr(user, name) != value]
+        if changed:
+            with transaction.atomic():
+                for name in changed:
+                    setattr(user, name, serializer.validated_data[name])
+                user.save(update_fields=changed)
+                AuditLog.record(AuditLog.PROFILE_UPDATED, actor=user, target=user, request=request, details={"fields": changed})
+        return Response(ProfileSerializer(user).data)
 
     @extend_schema(
         tags=["My account"],
@@ -109,7 +185,7 @@ class MeViewSet(viewsets.ViewSet):
         responses={204: OpenApiResponse(description="Removed."), 401: UNAUTHORIZED, 403: FORBIDDEN},
         methods=["DELETE"],
     )
-    @action(detail=False, methods=["put", "delete"])
+    @action(detail=False, methods=["put", "delete"], parser_classes=[MultiPartParser, FormParser])
     def picture(self, request):
         user = request.user
         old = user.profile_picture_public_id

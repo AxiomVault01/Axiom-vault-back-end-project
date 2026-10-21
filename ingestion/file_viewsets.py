@@ -31,6 +31,7 @@ class AnyFileSerializer(serializers.Serializer):
 class UploaderSerializer(serializers.Serializer):
     id = serializers.UUIDField(help_text="The uploader's user ID.")
     full_name = serializers.CharField(help_text="The uploader's name.")
+    profile_picture = serializers.URLField(allow_null=True, help_text="Public URL of their profile picture, or `null`.")
 
 
 class StoredFileSerializer(serializers.Serializer):
@@ -57,7 +58,10 @@ def describe(stored, link=True):
         "file_name": stored.file_name,
         "content_type": stored.content_type,
         "size": stored.size,
-        "uploaded_by": {"id": str(uploader.id), "full_name": uploader.full_name} if uploader else None,
+        "uploaded_by": (
+            {"id": str(uploader.id), "full_name": uploader.full_name, "profile_picture": uploader.profile_picture_url or None}
+            if uploader else None
+        ),
         "created_at": stored.created_at,
         "url": url,
         "url_expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc) if expires_at else None,

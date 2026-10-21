@@ -56,7 +56,7 @@ def test_upload_any_file(member, org, fake_storage):
     assert body["id"] == str(stored.id)
     assert body["file_name"] == "statement.pdf" and body["content_type"] == "application/pdf"
     assert body["size"] == len(b"%PDF-1.4 bank statement")
-    assert body["uploaded_by"] == {"id": str(member.id), "full_name": "Ada Obi"}
+    assert body["uploaded_by"] == {"id": str(member.id), "full_name": "Ada Obi", "profile_picture": None}
     assert body["url"].startswith("https://storage.test/") and body["url_expires_at"]
     assert "public_id" not in body
     assert stored.public_id == f"axiomvault/{org.id}/files/{stored.id}.pdf"
