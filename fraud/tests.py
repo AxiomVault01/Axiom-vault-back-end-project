@@ -461,7 +461,7 @@ def test_history_is_oldest_first_and_names_the_actor(uploader, org):
 
     assert [e["type"] for e in results] == ["created", "status_changed"]
     assert results[0]["actor"] is None
-    assert results[1]["actor"] == {"id": str(uploader.id), "full_name": uploader.full_name}
+    assert results[1]["actor"] == {"id": str(uploader.id), "full_name": uploader.full_name, "profile_picture": None}
 
 
 def test_assign_and_remove_a_reviewer(uploader, org, member):
@@ -471,7 +471,7 @@ def test_assign_and_remove_a_reviewer(uploader, org, member):
     assigned = client.put(alert_url("ALT-0001", "reviewer"), {"reviewer_id": str(member.id)}, format="json").json()
     removed = client.put(alert_url("ALT-0001", "reviewer"), {"reviewer_id": None}, format="json").json()
 
-    assert assigned["assigned_reviewer"] == {"id": str(member.id), "full_name": "Ada Obi", "email": "ada@ikejacoop.ng"}
+    assert assigned["assigned_reviewer"] == {"id": str(member.id), "full_name": "Ada Obi", "email": "ada@ikejacoop.ng", "profile_picture": None}
     assert removed["assigned_reviewer"] is None
     assert list(AlertEvent.objects.filter(type__startswith="reviewer").values_list("type", "detail")) == [
         ("reviewer_assigned", "Ada Obi"), ("reviewer_removed", "")

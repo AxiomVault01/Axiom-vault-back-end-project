@@ -170,6 +170,7 @@ class AuditLog(models.Model):
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
     FILE_UPLOADED = "file_uploaded"
+    PROFILE_UPDATED = "profile_updated"
     PROFILE_PICTURE_UPDATED = "profile_picture_updated"
     PROFILE_PICTURE_REMOVED = "profile_picture_removed"
     ALERT_CREATED = "alert_created"
@@ -197,6 +198,7 @@ class AuditLog(models.Model):
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
         (FILE_UPLOADED, "Uploaded a file"),
+        (PROFILE_UPDATED, "Edited their profile"),
         (PROFILE_PICTURE_UPDATED, "Changed their profile picture"),
         (PROFILE_PICTURE_REMOVED, "Removed their profile picture"),
         (ALERT_CREATED, "Detection opened an alert"),

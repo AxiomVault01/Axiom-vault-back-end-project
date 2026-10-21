@@ -213,3 +213,52 @@ class TeamMemberUpdateSerializer(serializers.Serializer):
         if User.objects.filter(email__iexact=value).exclude(pk=member.pk).exists():
             raise serializers.ValidationError(EMAIL_TAKEN_MESSAGE)
         return value
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    """The logged-in user's own profile (Profile screen)."""
+
+    # Plain text in the docs: the model's choices plus "" (staff) would show as a third account-type enum in Swagger.
+    account_type = serializers.CharField(read_only=True, help_text="`super_admin`, `team_member`, or empty for AxiomVault staff. Read-only.")
+    organisation = serializers.SerializerMethodField(help_text="`{id, name}` of the user's Cooperative, or `null` for AxiomVault staff.")
+    profile_picture = serializers.SerializerMethodField(help_text="Public URL of the picture, or `null` (show initials). Change it with `PUT /api/v1/me/picture/`.")
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "email", "full_name", "department", "phone_number", "role", "account_type", "organisation",
+            "profile_picture", "is_staff", "date_joined", "last_login",
+        ]
+        read_only_fields = fields
+        extra_kwargs = {
+            "id": {"help_text": "The user's ID."},
+            "email": {"help_text": "Login email. Read-only here: a super admin (or AxiomVault staff) changes it."},
+            "full_name": {"help_text": "Name shown in the app. Editable."},
+            "department": {"help_text": "One of the signup departments (e.g. `internal_audit`), or empty. Editable."},
+            "phone_number": {"help_text": "Digits with an optional leading +, or empty. Editable."},
+            "role": {"help_text": "Job title the super admin wrote, or empty. Read-only here."},
+            "is_staff": {"help_text": "`true` for AxiomVault staff (Admin Control Panel)."},
+            "date_joined": {"help_text": "When the account was created (ISO 8601)."},
+            "last_login": {"help_text": "Last successful login (ISO 8601), or `null`."},
+        }
+
+    def get_organisation(self, user) -> dict | None:
+        org = user.organisation
+        return {"id": str(org.id), "name": org.name} if org else None
+
+    def get_profile_picture(self, user) -> str | None:
+        return user.profile_picture_url or None
+
+
+class ProfileUpdateSerializer(serializers.Serializer):
+    """Every field is optional; only the fields sent change. Any other key is ignored."""
+
+    full_name = serializers.CharField(max_length=255, required=False, help_text="New full name, 1 to 255 characters (spaces trimmed).")
+    department = serializers.ChoiceField(choices=DEPARTMENT_CHOICES, required=False, help_text="New department, one of the signup choices.")
+    phone_number = serializers.CharField(
+        max_length=30, required=False, allow_blank=True,
+        help_text="New phone number: 7 to 15 digits, optional leading +; spaces and hyphens are removed. `\"\"` clears it.",
+    )
+
+    def validate_phone_number(self, value):
+        return clean_phone_number(value) if value.strip() else ""

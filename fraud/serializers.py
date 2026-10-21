@@ -9,15 +9,31 @@ STATUS_VALUES = [value for value, _ in Alert.STATUS_CHOICES]
 NOTE_MAX_LENGTH = 2000
 
 
+def person(user):
+    """A user as alert and case screens show them: `{id, full_name, email, profile_picture}`, or None."""
+    if user is None:
+        return None
+    return {"id": str(user.id), "full_name": user.full_name, "email": user.email, "profile_picture": user.profile_picture_url or None}
+
+
+def actor(user):
+    """Who did something (history, notes, comments): `{id, full_name, profile_picture}`, or None."""
+    if user is None:
+        return None
+    return {"id": str(user.id), "full_name": user.full_name, "profile_picture": user.profile_picture_url or None}
+
+
 class PersonSerializer(serializers.Serializer):
     id = serializers.UUIDField(help_text="The user's ID.")
     full_name = serializers.CharField(help_text="Name shown in the app.")
     email = serializers.EmailField(help_text="The user's login email.")
+    profile_picture = serializers.URLField(allow_null=True, help_text="Public URL of their profile picture, or `null` (show initials).")
 
 
 class ActorSerializer(serializers.Serializer):
     id = serializers.UUIDField(help_text="The user's ID.")
     full_name = serializers.CharField(help_text="Name shown in the app.")
+    profile_picture = serializers.URLField(allow_null=True, help_text="Public URL of their profile picture, or `null` (show initials).")
 
 
 class UploadSummarySerializer(serializers.Serializer):
@@ -31,7 +47,7 @@ class AlertListSerializer(serializers.ModelSerializer):
     """One row of the Alerts table."""
 
     reference = serializers.CharField(read_only=True, help_text="Readable ID, e.g. `ALT-0001`. Use it in every alert URL.")
-    assigned_reviewer = PersonSerializer(allow_null=True, read_only=True, help_text="Who reviews it, or `null`.")
+    assigned_reviewer = serializers.SerializerMethodField(help_text="Who reviews it, or `null`.")
 
     class Meta:
         model = Alert
@@ -54,6 +70,10 @@ class AlertListSerializer(serializers.ModelSerializer):
             "confidence": {"help_text": "0-100, shown as a percentage."},
             "detected_at": {"help_text": "When detection opened the alert (ISO 8601)."},
         }
+
+    @extend_schema_field(PersonSerializer(allow_null=True))
+    def get_assigned_reviewer(self, alert):
+        return person(alert.assigned_reviewer)
 
 
 class AlertDetailSerializer(AlertListSerializer):
@@ -124,7 +144,7 @@ class AlertEventSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(ActorSerializer(allow_null=True))
     def get_actor(self, event):
-        return {"id": str(event.actor.id), "full_name": event.actor.full_name} if event.actor else None
+        return actor(event.actor)
 
 
 class AlertNoteSerializer(serializers.ModelSerializer):
@@ -138,7 +158,7 @@ class AlertNoteSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(ActorSerializer(allow_null=True))
     def get_author(self, note):
-        return {"id": str(note.author.id), "full_name": note.author.full_name} if note.author else None
+        return actor(note.author)
 
 
 

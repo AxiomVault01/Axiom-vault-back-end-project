@@ -8,21 +8,13 @@ from config.file_storage import StorageUnavailable
 from ingestion.file_viewsets import StoredFileSerializer, describe
 
 from .models import Case, CaseComment, CaseEvent
-from .serializers import NOTE_MAX_LENGTH, ActorSerializer, AlertListSerializer, PersonSerializer
+from .serializers import NOTE_MAX_LENGTH, ActorSerializer, AlertListSerializer, PersonSerializer, actor, person
 
 CASE_STATUS_VALUES = [value for value, _ in Case.STATUS_CHOICES]
 PRIORITY_VALUES = [value for value, _ in Case.PRIORITY_CHOICES]
 REASON_VALUES = [value for value, _ in Case.ESCALATION_REASON_CHOICES]
 MAX_ALERTS_PER_CASE = 20
 MAX_ESCALATION_DOCUMENTS = 10
-
-
-def person(user):
-    return {"id": str(user.id), "full_name": user.full_name, "email": user.email} if user else None
-
-
-def actor(user):
-    return {"id": str(user.id), "full_name": user.full_name} if user else None
 
 
 def evidence_item(evidence):

@@ -53,8 +53,9 @@ SLA_NOTE = (
     "`sla_days_remaining` is rounded up (\"2 days remaining\"), 0 or negative when overdue, `null` once closed; "
     "changing the priority (escalation) moves the due date."
 )
-PERSON = {"id": "7c1e2f4a-9b3d-4e6f-8a2c-1d5b7e9f0a3c", "full_name": "Ada Obi", "email": "ada.obi@ikejacoop.ng"}
-ACTOR = {"id": "2d089ad3-9545-4611-a9dc-731c3a81879f", "full_name": "Ngozi Okafor"}
+PICTURE = "https://res.cloudinary.com/<cloud>/image/upload/v1792080000/axiomvault/avatars/2d089ad3-9545-4611-a9dc-731c3a81879f/9f2c4e1a7b3d5c60.png"
+PERSON = {"id": "7c1e2f4a-9b3d-4e6f-8a2c-1d5b7e9f0a3c", "full_name": "Ada Obi", "email": "ada.obi@ikejacoop.ng", "profile_picture": None}
+ACTOR = {"id": "2d089ad3-9545-4611-a9dc-731c3a81879f", "full_name": "Ngozi Okafor", "profile_picture": PICTURE}
 CASE_EXAMPLE = {
     "reference": "CASE-0001",
     "title": "Invoice INV-2024-8847 paid 2 times to Acme Supplies",
