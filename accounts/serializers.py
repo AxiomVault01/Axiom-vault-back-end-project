@@ -3,6 +3,8 @@ from django.core.validators import RegexValidator
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 
+from .models import UserSettings
+
 User = get_user_model()
 
 class SendOTPSerializer(serializers.Serializer):
@@ -262,3 +264,39 @@ class ProfileUpdateSerializer(serializers.Serializer):
 
     def validate_phone_number(self, value):
         return clean_phone_number(value) if value.strip() else ""
+
+
+SETTINGS_HELP = {
+    "critical_risk_alerts": "Critical Risk Alerts switch: get notified about critical fraud detection. Default `true`.",
+    "high_risk_alerts": "High Risk Alerts switch: notifications for high priority cases. Default `true`.",
+    "daily_summary_reports": "Daily Summary Reports switch: receive daily email summaries. Default `false`.",
+    "system_updates": "System Updates switch: platform updates and maintenance notices. Default `true`.",
+    "language": "`en-US` (English US, default), `en-GB` (English UK), or `es` (Spanish).",
+    "time_zone": "IANA time zone name, e.g. `Africa/Lagos` (default) or `Europe/London`. The frontend shows times in it; "
+    "the API always sends ISO 8601 UTC.",
+    "date_format": "`DD/MM/YYYY` (default), `MM/DD/YYYY`, or `YYYY-MM-DD`; the frontend formats dates with it.",
+}
+SETTINGS_FIELDS = list(SETTINGS_HELP)
+TIME_ZONE_MESSAGE = "Use a time zone name such as Africa/Lagos or Europe/London."
+
+
+class SettingsSerializer(serializers.ModelSerializer):
+    """The Settings screen's Notification and System Preferences. Every field is optional on PATCH."""
+
+    class Meta:
+        model = UserSettings
+        fields = [*SETTINGS_FIELDS, "updated_at"]
+        read_only_fields = ["updated_at"]
+        extra_kwargs = {
+            **{name: {"help_text": text, "required": False} for name, text in SETTINGS_HELP.items()},
+            "updated_at": {"help_text": "Last change (ISO 8601)."},
+        }
+
+    def validate_time_zone(self, value):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise serializers.ValidationError(TIME_ZONE_MESSAGE)
+        return value

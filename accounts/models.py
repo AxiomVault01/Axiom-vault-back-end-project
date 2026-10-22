@@ -171,6 +171,7 @@ class AuditLog(models.Model):
     PAYMENTS_UPLOADED = "payments_uploaded"
     FILE_UPLOADED = "file_uploaded"
     PROFILE_UPDATED = "profile_updated"
+    SETTINGS_UPDATED = "settings_updated"
     PROFILE_PICTURE_UPDATED = "profile_picture_updated"
     PROFILE_PICTURE_REMOVED = "profile_picture_removed"
     ALERT_CREATED = "alert_created"
@@ -199,6 +200,7 @@ class AuditLog(models.Model):
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
         (FILE_UPLOADED, "Uploaded a file"),
         (PROFILE_UPDATED, "Edited their profile"),
+        (SETTINGS_UPDATED, "Changed their settings"),
         (PROFILE_PICTURE_UPDATED, "Changed their profile picture"),
         (PROFILE_PICTURE_REMOVED, "Removed their profile picture"),
         (ALERT_CREATED, "Detection opened an alert"),
@@ -266,3 +268,30 @@ class AuditLog(models.Model):
             details=details or {},
             ip_address=None if ip in (None, UNKNOWN_IP) else ip,
         )
+
+
+class UserSettings(models.Model):
+    """A user's Settings screen preferences (feature 18). Created with these defaults on first read.
+
+    The notification switches are stored for a later notification feature; nothing sends notifications yet.
+    """
+
+    LANGUAGE_CHOICES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("es", "Spanish")]
+    DATE_FORMAT_CHOICES = [("DD/MM/YYYY", "DD/MM/YYYY"), ("MM/DD/YYYY", "MM/DD/YYYY"), ("YYYY-MM-DD", "YYYY-MM-DD")]
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="settings")
+    critical_risk_alerts = models.BooleanField(default=True)
+    high_risk_alerts = models.BooleanField(default=True)
+    daily_summary_reports = models.BooleanField(default=False)
+    system_updates = models.BooleanField(default=True)
+    language = models.CharField(max_length=10, choices=LANGUAGE_CHOICES, default="en-US")
+    # An IANA time zone name, checked against the system's time zone database.
+    time_zone = models.CharField(max_length=64, default="Africa/Lagos")
+    date_format = models.CharField(max_length=10, choices=DATE_FORMAT_CHOICES, default="DD/MM/YYYY")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "user_settings"
+
+    def __str__(self):
+        return f"Settings of {self.user}"
