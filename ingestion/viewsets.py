@@ -258,12 +258,18 @@ class IngestionViewSet(viewsets.ViewSet):
     @upload_docs(
         PAYROLL_SCHEMA,
         "payroll",
-        "One row per employee per pay period.",
+        "One row per employee per pay period. Follows the frontend's payroll template: Employee ID, Full Name, "
+        "Department, Position, Bank Account Number, Salary Amount (the net salary paid), Payment Date, Attendance "
+        "Days, Employment Status, Exit Date, Approver ID (required on every row), plus Pay Period (for example "
+        "`2026-10`) until the client confirms it can be taken from the Payment Date.",
         [
             {"row": 5, "field": "net_salary", "error": "The amount cannot be negative."},
             {"row": 9, "field": "payment_date", "error": "Use a date like 2026-09-28 or 28/09/2026."},
+            {"row": 12, "field": "exit_date", "error": "Exit Date is required when Employment Status shows the employee has left."},
         ],
-        "The same employee, account number, and pay period twice in one file is an error.",
+        "The same employee, account number, and pay period twice in one file is an error. When Employment Status "
+        "says the employee has left (`Exited`, `Terminated`, `Resigned`, `Retired`, `Dismissed`, `Left`, or "
+        "`Inactive`, any letter case), Exit Date is required on that row.",
         _saved("payroll", "september-payroll.xlsx", 248, 48213, ["Remarks"],
                {"status": "completed", "alerts_created": 1, "alerts": ["ALT-0007"]}),
     )

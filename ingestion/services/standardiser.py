@@ -30,6 +30,8 @@ class UploadSchema:
     fields: dict
     duplicate_key: tuple[str, ...]
     duplicate_message: str
+    # Optional check across one row's typed values; returns [(field, error)].
+    row_check: object = None
     header_to_field: dict = dc_field(init=False)
 
     def __post_init__(self):
@@ -49,18 +51,36 @@ def money(required=False, aliases=(), blank=None):
     return Field("money", required=required, aliases=tuple(aliases), blank=blank)
 
 
+# Employment Status values that mean the person no longer works there (letter case ignored).
+EXITED_STATUSES = {"exited", "exit", "terminated", "resigned", "retired", "dismissed", "left", "inactive"}
+EXIT_DATE_REQUIRED = "Exit Date is required when Employment Status shows the employee has left."
+
+
+def payroll_row_check(values: dict) -> list[tuple[str, str]]:
+    status = (values.get("employment_status") or "").strip().lower()
+    if status in EXITED_STATUSES and not values.get("exit_date"):
+        return [("exit_date", EXIT_DATE_REQUIRED)]
+    return []
+
+
+# Follows the frontend's "Required Columns (payroll)" template (2026-10-22): Employee ID, Full Name,
+# Department, Position, Bank Account Number, Salary Amount (net salary), Payment Date, Attendance Days,
+# Employment Status, Exit Date, Approver ID (required). Pay Period stays required until the client decides.
 PAYROLL_SCHEMA = UploadSchema(
     kind="payroll",
     fields={
         "employee_id": text(100, True, ["staff_id", "employee_no", "employee_number", "emp_id"]),
         "employee_name": text(255, True, ["name", "full_name", "staff_name"]),
         "department": text(255, True, ["dept"]),
-        "salary_basic": money(True, ["basic_salary", "basic", "basic_pay"]),
-        "net_salary": money(True, ["net_pay", "net", "take_home"]),
-        "account_number": Field("account", required=True, aliases=("account_no", "bank_account", "acct_no", "account")),
-        "pay_period": text(20, True, ["period", "payroll_period", "month"]),
+        "role": text(100, True, ["position", "job_title", "designation"]),
+        "account_number": Field(
+            "account", required=True,
+            aliases=("bank_account_number", "account_no", "bank_account", "acct_no", "account", "account_number"),
+        ),
+        "net_salary": money(True, ["salary_amount", "salary", "net_pay", "net", "take_home"]),
         "payment_date": Field("date", required=True, aliases=("pay_date", "date_paid")),
-        "role": text(100, aliases=["job_title", "designation", "position"]),
+        "pay_period": text(20, True, ["period", "payroll_period", "month"]),
+        "salary_basic": money(aliases=["basic_salary", "basic", "basic_pay"]),
         "allowances": money(aliases=["allowance"], blank=Decimal("0")),
         "deductions": money(aliases=["deduction"], blank=Decimal("0")),
         "bank_name": text(100, aliases=["bank"]),
@@ -70,7 +90,13 @@ PAYROLL_SCHEMA = UploadSchema(
         "supervisor_id": text(100, aliases=["supervisor"]),
         "employment_type": text(50, aliases=["contract_type"]),
         "grade_level": text(50, aliases=["grade", "level"]),
+        # Blank cells become "" (the columns store empty text, not null).
+        "employment_status": Field("text", max_length=50, aliases=("status", "employee_status"), blank=""),
+        "exit_date": Field("date", aliases=("date_of_exit", "exit", "date_left")),
+        # Required on every row (decided 2026-10-22): who approved the payment.
+        "approver_id": text(100, True, ["approver", "approved_by"]),
     },
+    row_check=payroll_row_check,
     duplicate_key=("employee_id", "account_number", "pay_period"),
     duplicate_message="Duplicate payroll record: same employee, account number, and pay period as row {first}.",
 )
@@ -142,6 +168,8 @@ class Standardiser:
                 values[name] = self._clean(self.schema.fields[name], raw)
             except RowError as exc:
                 errors.append((name, str(exc)))
+        if self.schema.row_check and not errors:
+            errors.extend(self.schema.row_check(values))
         return values, errors
 
     def _clean(self, spec: Field, raw):

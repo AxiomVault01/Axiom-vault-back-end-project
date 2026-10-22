@@ -240,14 +240,14 @@ def csv(name, header, rows):
     return SimpleUploadedFile(name, text.encode("utf-8"))
 
 
-PAYROLL_HEADER = "employee_id,employee_name,department,salary_basic,net_salary,account_number,pay_period,payment_date"
+PAYROLL_HEADER = "employee_id,employee_name,department,salary_basic,net_salary,account_number,pay_period,payment_date,role,approver_id"
 PAYMENTS_HEADER = "transaction_id,vendor_id,invoice_number,amount,payment_date"
 
 
 def test_payroll_upload_reports_new_alerts(uploader):
     file = csv("p.csv", PAYROLL_HEADER, [
-        "E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28",
-        "E2,Bola,Ops,100,90,0123456789,2026-09,2026-09-28",
+        "E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28,Clerk,APR-01",
+        "E2,Bola,Ops,100,90,0123456789,2026-09,2026-09-28,Clerk,APR-01",
     ])
 
     body = client_for(uploader).post(PAYROLL_URL, {"file": file}, format="multipart").json()
@@ -265,7 +265,7 @@ def test_payments_upload_reports_new_alerts(uploader):
 
 
 def test_clean_upload_reports_zero_alerts(uploader):
-    file = csv("p.csv", PAYROLL_HEADER, ["E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28"])
+    file = csv("p.csv", PAYROLL_HEADER, ["E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28,Clerk,APR-01"])
 
     body = client_for(uploader).post(PAYROLL_URL, {"file": file}, format="multipart").json()
 

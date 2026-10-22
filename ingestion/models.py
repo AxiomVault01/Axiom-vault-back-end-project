@@ -46,7 +46,8 @@ class Payroll(models.Model):
     employee_name = models.CharField(max_length=255)
     department = models.CharField(max_length=255)
 
-    salary_basic = models.DecimalField(max_digits=12, decimal_places=2)
+    # Optional since the frontend template has one "Salary Amount", stored as net_salary (2026-10-22).
+    salary_basic = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     net_salary = models.DecimalField(max_digits=12, decimal_places=2)
 
     account_number = models.CharField(max_length=20)
@@ -65,6 +66,9 @@ class Payroll(models.Model):
     location = models.CharField(max_length=100, null=True, blank=True)
     supervisor_id = models.CharField(max_length=100, null=True, blank=True)
     employment_type = models.CharField(max_length=50, null=True, blank=True)
+    employment_status = models.CharField(max_length=50, blank=True, default="")
+    exit_date = models.DateField(null=True, blank=True)
+    approver_id = models.CharField(max_length=100, blank=True, default="")
     grade_level = models.CharField(max_length=50, null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
