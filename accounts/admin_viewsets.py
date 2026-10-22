@@ -3,12 +3,20 @@
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers, status, viewsets
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .models import AuditLog, User
-from .serializers import AdminLoginSerializer
-from .services import INVALID_CREDENTIALS_MESSAGE, NOT_ADMIN_MESSAGE, AuthService
+from .permissions import IsAxiomVaultStaff
+from .serializers import AdminLoginSerializer, LogoutSerializer
+from .services import (
+    INVALID_CREDENTIALS_MESSAGE,
+    LOGOUT_SUCCESS_MESSAGE,
+    LOGOUT_TOKEN_INVALID_MESSAGE,
+    LOGOUT_WRONG_ACCOUNT_MESSAGE,
+    NOT_ADMIN_MESSAGE,
+    AuthService,
+)
 
 ADMIN_TAG = "Admin Control Panel"
 
@@ -103,3 +111,56 @@ class AdminAuthViewSet(viewsets.ViewSet):
         user = User.objects.get(pk=result["user"]["id"])
         AuditLog.record(AuditLog.LOGIN, actor=user, details={"panel": "admin", "admin_role": result["user"]["admin_role"]}, request=request)
         return Response(result, status=status.HTTP_200_OK)
+
+
+class AdminLogoutViewSet(viewsets.ViewSet):
+    """Sign-out for the Admin Control Panel."""
+
+    # No temporary-password block: a staff member who has not changed it yet can still sign out.
+    permission_classes = [IsAuthenticated, IsAxiomVaultStaff]
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Admin Control Panel sign out",
+        description=(
+            "**Sign out button** in the Admin Control Panel. Ends this session: the `refresh` token is blacklisted, "
+            "so `POST /api/v1/auth/token/refresh/` refuses it from now on. The current access token still works until "
+            "it expires (at most 30 minutes), so the panel should also delete both tokens from memory.\n\n"
+            "**Request fields**\n"
+            "- `refresh` (required): the refresh token from the admin sign-in\n\n"
+            "**Responses**\n"
+            "- `200`: signed out; go to the sign-in screen\n"
+            "- `400`: `refresh` missing, already used for sign-out, expired, or not a refresh token\n"
+            "- `401`: no access token, or it is invalid or expired; just clear the stored tokens\n"
+            "- `403` with `code: \"not_admin\"`: the access token belongs to a Cooperative account, not staff\n"
+            "- `403` (no code): the refresh token belongs to a different account\n\n"
+            "Works for a staff member who still has a temporary password. Recorded in the audit log.\n\n"
+            "**Authentication:** `Authorization: Bearer <access_token>` of a staff or owner account."
+        ),
+        request=LogoutSerializer,
+        examples=[OpenApiExample("Sign out", value={"refresh": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."}, request_only=True)],
+        responses={
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Signed out", value={"message": LOGOUT_SUCCESS_MESSAGE})]),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                examples=[
+                    OpenApiExample("Already signed out", value={"error": LOGOUT_TOKEN_INVALID_MESSAGE}),
+                    OpenApiExample("Missing refresh", value={"refresh": ["This field is required."]}),
+                ],
+            ),
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("No token", value={"detail": "Authentication credentials were not provided."})]),
+            403: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                examples=[
+                    OpenApiExample("Not staff", value={"error": NOT_ADMIN_MESSAGE, "code": "not_admin"}),
+                    OpenApiExample("Someone else's token", value={"error": LOGOUT_WRONG_ACCOUNT_MESSAGE}),
+                ],
+            ),
+        },
+    )
+    def logout(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        AuthService.logout(request.user, serializer.validated_data["refresh"])
+        AuditLog.record(AuditLog.LOGOUT, actor=request.user, details={"panel": "admin"}, request=request)
+        return Response({"message": LOGOUT_SUCCESS_MESSAGE}, status=status.HTTP_200_OK)

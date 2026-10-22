@@ -143,7 +143,7 @@ class EmailNotVerified(APIException):
         self.detail = {"error": EMAIL_NOT_VERIFIED_MESSAGE}
 
 
-NOT_ADMIN_MESSAGE = "This account can't sign in to the Admin Control Panel."
+from .permissions import NOT_ADMIN_MESSAGE  # noqa: E402 (one copy of the message)
 
 
 class NotAdminAccount(APIException):

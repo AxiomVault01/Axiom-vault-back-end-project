@@ -121,3 +121,66 @@ def test_staff_on_a_temporary_password_can_change_it(staff):
 
     assert response.status_code == 200, response.json()
     assert sign_in("support@axiomvault.ng", "N3w-Support-Pass!").json()["user"]["must_change_password"] is False
+
+
+# ---- 27: admin sign out ----
+
+LOGOUT = "/api/v1/admin/auth/logout/"
+
+
+def signed_in(email):
+    tokens = sign_in(email).json()
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + tokens["access"])
+    return client, tokens["refresh"]
+
+
+@pytest.mark.parametrize("who", ["owner", "staff"])
+def test_staff_and_owner_sign_out(owner, staff, who):
+    client, refresh = signed_in(f"{'owner' if who == 'owner' else 'support'}@axiomvault.ng")
+
+    response = client.post(LOGOUT, {"refresh": refresh}, format="json")
+
+    assert response.status_code == 200 and response.json() == {"message": "Logged out successfully."}
+    assert APIClient().post("/api/v1/auth/token/refresh/", {"refresh": refresh}, format="json").status_code == 401
+    again = client.post(LOGOUT, {"refresh": refresh}, format="json")
+    assert again.status_code == 400 and again.json() == {"error": "This session has already ended or the token is invalid."}
+    assert AuditLog.objects.filter(action=AuditLog.LOGOUT, details__panel="admin").count() == 1
+
+
+def test_staff_on_a_temporary_password_can_sign_out(staff):
+    User.objects.filter(pk=staff.pk).update(must_change_password=True)
+    client, refresh = signed_in("support@axiomvault.ng")
+
+    assert client.post(LOGOUT, {"refresh": refresh}, format="json").status_code == 200
+
+
+def test_cooperative_tokens_are_refused(db):
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    org = Organisation.objects.create(name="Ikeja Coop")
+    user = User.objects.create_user(username="ngozi", email="ngozi@ikejacoop.ng", password=PASSWORD, organisation=org, account_type="super_admin", is_verified=True)
+    refresh = RefreshToken.for_user(user)
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION="Bearer " + str(refresh.access_token))
+
+    response = client.post(LOGOUT, {"refresh": str(refresh)}, format="json")
+
+    assert response.status_code == 403 and response.json() == {"error": "This account can't sign in to the Admin Control Panel.", "code": "not_admin"}
+
+
+def test_sign_out_needs_a_valid_token(staff):
+    _, refresh = signed_in("support@axiomvault.ng")
+
+    assert APIClient().post(LOGOUT, {"refresh": refresh}, format="json").status_code == 401
+    bad = APIClient()
+    bad.credentials(HTTP_AUTHORIZATION="Bearer not.a.token")
+    assert bad.post(LOGOUT, {"refresh": refresh}, format="json").status_code == 401
+
+
+def test_someone_elses_refresh_token_and_missing_field(owner, staff):
+    client, _ = signed_in("support@axiomvault.ng")
+    _, owners_refresh = signed_in("owner@axiomvault.ng")
+
+    assert client.post(LOGOUT, {"refresh": owners_refresh}, format="json").json() == {"error": "This refresh token belongs to a different account."}
+    assert client.post(LOGOUT, {}, format="json").status_code == 400
