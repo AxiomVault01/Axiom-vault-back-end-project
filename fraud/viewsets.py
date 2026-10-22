@@ -15,7 +15,9 @@ from accounts.models import AuditLog
 from accounts.permissions import PASSWORD_CHANGE_REQUIRED_MESSAGE, PasswordChangeNotRequired
 from ingestion.viewsets import BelongsToOrganisation, NO_ORGANISATION_MESSAGE
 
+from .investigation_serializers import InvestigationSerializer
 from .models import Alert, AlertEvent, AlertNote
+from .services.investigation import InvestigationService
 from .serializers import (
     AlertDetailSerializer,
     AlertEventSerializer,
@@ -80,6 +82,56 @@ DETAIL_EXAMPLE = {
     "ai_confidence": None,
     "updated_at": "2026-10-14T18:02:11Z",
 }
+
+
+INVESTIGATION_EXAMPLE = {
+    "subject": {"type": "alert", "reference": "ALT-0002"},
+    "alerts": [ALERT_EXAMPLE],
+    "related": {
+        "employees": [],
+        "vendors": [{"id": "VND-8847", "name": "Acme Supplies", "bank_name": "GTBank", "registration_number": "RC-1029384"}],
+        "approvers": [{"id": "", "name": "John Doe", "role": "", "department": ""}],
+    },
+    "linked_alerts": [{**ALERT_EXAMPLE, "reference": "ALT-0007", "title": "Invoice INV-2024-9120 paid 2 times to Acme Supplies", "case": "CASE-0003"}],
+    "transactions": {
+        "count": 3,
+        "results": [
+            {"kind": "payment", "id": "TXN-91002", "description": "Acme Supplies, invoice INV-2024-9001", "amount": "18,000.00", "date": "2026-06-01", "status": "clear", "alerts": []},
+            {"kind": "payment", "id": "TXN-90455", "description": "Acme Supplies, invoice INV-2024-8847", "amount": "42,350.00", "date": "2026-05-08", "status": "flagged", "alerts": ["ALT-0002"]},
+            {"kind": "payment", "id": "TXN-90214", "description": "Acme Supplies, invoice INV-2024-8847", "amount": "42,350.00", "date": "2026-05-05", "status": "flagged", "alerts": ["ALT-0002"]},
+        ],
+    },
+    "analysis": {
+        "total_exposure": "84,700.00", "duplicate_amount": "42,350.00", "risk_score": 90, "transaction_count": 2,
+        "currency": "NGN", "source": "derived",
+    },
+    "pattern_detections": [],
+    "timeline": [
+        {"date": "2026-05-05", "label": "Payment", "detail": "TXN-90214: paid 42,350.00", "alert": "ALT-0002"},
+        {"date": "2026-05-08", "label": "Payment", "detail": "TXN-90455: paid 42,350.00", "alert": "ALT-0002"},
+        {"date": "2026-05-08", "label": "Alert generated", "detail": "Duplicate payment detected", "alert": "ALT-0002"},
+    ],
+}
+INVESTIGATION_NOTE = (
+    "**What each part means:**\n"
+    "- `related`: the employees the alerts are about or flag (name, position, department from their latest "
+    "payroll row), the vendors (name, bank, registration number from the latest vendors file), and the approvers "
+    "of the flagged records (a payroll `approver_id` is looked up as an employee; a payment approver is a name "
+    "only). Bank account numbers are not repeated here; the flagged records already show them.\n"
+    "- `linked_alerts`: other alerts of your organisation about the same employees or vendors, newest first, at "
+    "most 50, each with the `case` investigating it. Open one with `GET /api/v1/fraud/alerts/{reference}/`.\n"
+    "- `transactions`: connected transactions, every stored vendor payment to those vendors and every salary paid "
+    "to those employees or into the flagged bank accounts. `count` is the total; `results` holds the newest 100. "
+    "`status` is `flagged` (with the `alerts` that flag it) or `clear`.\n"
+    "- `analysis`: the Transaction Analysis box. `total_exposure` sums the flagged amounts (each transaction once); "
+    "`duplicate_amount` is the money paid in duplicate (duplicate payment: total minus the largest payment; shared "
+    "bank account: every salary after the first; 0 for other rules); `risk_score` is the highest alert score; "
+    "`transaction_count` counts the flagged transactions. `source: \"derived\"` until ML defines these numbers.\n"
+    "- `pattern_detections`: reserved for ML, `[]` for now.\n"
+    "- `timeline`: the transaction timeline (payments, salaries, alert generated), oldest first, each with its `alert`.\n\n"
+    "Amounts are text with 2 decimals and thousands commas, in `analysis.currency` (NGN). Nothing is changed or "
+    "recorded by this call."
+)
 
 
 def paged(results):
@@ -201,6 +253,27 @@ class AlertViewSet(viewsets.GenericViewSet):
     )
     def retrieve(self, request, reference=None):
         return self._detail(self.get_object())
+
+    @extend_schema(
+        tags=["Alerts"],
+        summary="Investigate an alert",
+        description=(
+            "**Investigation drill-down from the Alert detail screen.** Read-only: who and what the alert is "
+            "connected to, so an analyst can judge it before converting it to a case. For a case covering several "
+            "alerts use `GET /api/v1/fraud/cases/{reference}/investigation/` instead.\n\n"
+            + INVESTIGATION_NOTE + "\n\n" + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        responses={
+            200: OpenApiResponse(response=InvestigationSerializer, examples=[OpenApiExample("Investigation", value=INVESTIGATION_EXAMPLE)]),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @action(detail=True, methods=["get"])
+    def investigation(self, request, reference=None):
+        alert = self.get_object()
+        result = InvestigationService.build(request.user.organisation, [alert], {"type": "alert", "reference": alert.reference})
+        return Response(InvestigationSerializer(result).data, status=status.HTTP_200_OK)
 
     @extend_schema(
         tags=["Alerts"],
