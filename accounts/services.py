@@ -143,6 +143,17 @@ class EmailNotVerified(APIException):
         self.detail = {"error": EMAIL_NOT_VERIFIED_MESSAGE}
 
 
+NOT_ADMIN_MESSAGE = "This account can't sign in to the Admin Control Panel."
+
+
+class NotAdminAccount(APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": NOT_ADMIN_MESSAGE, "code": "not_admin"}
+
+
 class WrongSignInRole(APIException):
     status_code = status.HTTP_403_FORBIDDEN
 
@@ -417,6 +428,34 @@ class AuthService:
                 "department": user.department,
                 "role": user.role,
                 "account_type": user.account_type,
+                "must_change_password": user.must_change_password,
+                "profile_picture": user.profile_picture_url or None,
+            },
+        }
+
+    @staticmethod
+    def admin_login(request, email: str, password: str) -> dict:
+        """Admin Control Panel sign-in: AxiomVault staff only. Returns JWT tokens and the admin role.
+
+        `is_verified` is not checked: staff accounts come from `createsuperuser` or the owner, never signup.
+        """
+        user = authenticate(request, username=stored_email_for(email), password=password)
+        if user is None:
+            raise InvalidCredentials()
+        # Checked only after the password is correct, like the app login's role check.
+        if not user.is_staff:
+            raise NotAdminAccount()
+
+        refresh = RefreshToken.for_user(user)
+        update_last_login(None, user)
+        return {
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "admin_role": "owner" if user.is_superuser else "staff",
                 "must_change_password": user.must_change_password,
                 "profile_picture": user.profile_picture_url or None,
             },
