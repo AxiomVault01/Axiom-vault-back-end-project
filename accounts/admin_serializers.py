@@ -79,3 +79,125 @@ class SuspendSerializer(serializers.Serializer):
 class OrganisationFilterSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=[c for c, _ in Organisation.STATUS_CHOICES], required=False)
     search = serializers.CharField(required=False)
+
+
+# ---- 21: users and staff ----
+
+from .serializers import EMAIL_TAKEN_MESSAGE, clean_phone_number  # noqa: E402
+
+ACCOUNT_TYPE_HELP = "`super_admin` (one per organisation, manages its team) or `team_member`."
+
+
+class OrganisationSummarySerializer(serializers.Serializer):
+    id = serializers.UUIDField(help_text="The organisation's ID.")
+    name = serializers.CharField(help_text="Its name.")
+    status = serializers.CharField(help_text="`active` or `suspended`.")
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """A Cooperative user as AxiomVault staff see them."""
+
+    account_type = serializers.CharField(read_only=True, help_text=ACCOUNT_TYPE_HELP)
+    organisation = serializers.SerializerMethodField(help_text="`{id, name, status}` of the user's Cooperative.")
+    profile_picture = serializers.SerializerMethodField(help_text="Public URL of their picture, or `null`.")
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "email", "full_name", "account_type", "role", "phone_number", "organisation", "is_active",
+            "must_change_password", "profile_picture", "date_joined", "last_login",
+        ]
+        read_only_fields = fields
+        extra_kwargs = {
+            "id": {"help_text": "The user's ID; use it in the detail and action URLs."},
+            "email": {"help_text": "Login email."},
+            "full_name": {"help_text": "Name shown in the app."},
+            "role": {"help_text": "Free-text job title, or empty."},
+            "phone_number": {"help_text": "Phone number, or empty."},
+            "is_active": {"help_text": "`false` after deactivation: the user can't log in."},
+            "must_change_password": {"help_text": "`true` until they replace a temporary password."},
+            "date_joined": {"help_text": "When the account was created (ISO 8601)."},
+            "last_login": {"help_text": "Last successful login, or `null`."},
+        }
+
+    @extend_schema_field(OrganisationSummarySerializer)
+    def get_organisation(self, user):
+        org = user.organisation
+        return {"id": str(org.id), "name": org.name, "status": org.status} if org else None
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_profile_picture(self, user):
+        return user.profile_picture_url or None
+
+
+class StaffSerializer(serializers.ModelSerializer):
+    """An AxiomVault staff account, as the platform owner sees it."""
+
+    admin_role = serializers.SerializerMethodField(help_text="Always `staff` here; owner accounts are not listed.")
+    profile_picture = serializers.SerializerMethodField(help_text="Public URL of their picture, or `null`.")
+
+    class Meta:
+        model = User
+        fields = ["id", "email", "full_name", "admin_role", "is_active", "must_change_password", "profile_picture", "date_joined", "last_login"]
+        read_only_fields = fields
+        extra_kwargs = AdminUserSerializer.Meta.extra_kwargs
+
+    @extend_schema_field(serializers.CharField())
+    def get_admin_role(self, user):
+        return "owner" if user.is_superuser else "staff"
+
+    @extend_schema_field(serializers.URLField(allow_null=True))
+    def get_profile_picture(self, user):
+        return user.profile_picture_url or None
+
+
+class _EmailMixin:
+    def validate_email(self, value):
+        value = value.lower()
+        others = User.objects.filter(email__iexact=value)
+        if getattr(self, "instance", None) is not None:
+            others = others.exclude(pk=self.instance.pk)
+        if others.exists():
+            raise serializers.ValidationError(EMAIL_TAKEN_MESSAGE)
+        return value
+
+    def validate_phone_number(self, value):
+        return clean_phone_number(value) if value.strip() else ""
+
+
+PASSWORD_HELP = (
+    "Temporary password that you share with the person yourself (no email is sent). It must pass the normal "
+    "password rules; they must replace it on first login."
+)
+
+
+class StaffCreateSerializer(_EmailMixin, serializers.Serializer):
+    full_name = serializers.CharField(max_length=255, help_text="Full name, 1 to 255 characters.")
+    email = serializers.EmailField(help_text="Login email; must not belong to any other account.")
+    password = serializers.CharField(write_only=True, help_text=PASSWORD_HELP)
+
+
+class AdminUserCreateSerializer(StaffCreateSerializer):
+    organisation_id = serializers.UUIDField(help_text="The Cooperative the user joins.")
+    account_type = serializers.ChoiceField(choices=["super_admin", "team_member"], help_text=ACCOUNT_TYPE_HELP)
+    phone_number = serializers.CharField(max_length=30, required=False, allow_blank=True, help_text="Optional: 7 to 15 digits, optionally starting with +.")
+    role = serializers.CharField(max_length=100, required=False, allow_blank=True, help_text="Optional job title, e.g. `Payroll Analyst`.")
+
+
+class StaffUpdateSerializer(_EmailMixin, serializers.Serializer):
+    """Every field is optional; only the fields sent change."""
+
+    full_name = serializers.CharField(max_length=255, required=False, help_text="New full name.")
+    email = serializers.EmailField(required=False, help_text="New login email; must not belong to another account.")
+
+
+class AdminUserUpdateSerializer(StaffUpdateSerializer):
+    phone_number = serializers.CharField(max_length=30, required=False, allow_blank=True, help_text="New phone number; `\"\"` clears it.")
+    role = serializers.CharField(max_length=100, required=False, allow_blank=True, help_text="New job title; `\"\"` clears it.")
+
+
+class AdminUserFilterSerializer(serializers.Serializer):
+    organisation = serializers.UUIDField(required=False)
+    account_type = serializers.ChoiceField(choices=["super_admin", "team_member"], required=False)
+    is_active = serializers.BooleanField(required=False, allow_null=True, default=None)
+    search = serializers.CharField(required=False)

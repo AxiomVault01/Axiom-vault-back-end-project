@@ -2,7 +2,7 @@
 
 import uuid
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Q
 from django.http import Http404
 from django.utils import timezone
@@ -16,14 +16,22 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .admin_serializers import (
+    AdminUserCreateSerializer,
+    AdminUserFilterSerializer,
+    AdminUserSerializer,
+    AdminUserUpdateSerializer,
     OrganisationDetailSerializer,
     OrganisationFilterSerializer,
     OrganisationRowSerializer,
     OrganisationWriteSerializer,
+    StaffCreateSerializer,
+    StaffSerializer,
+    StaffUpdateSerializer,
     SuspendSerializer,
 )
 from .models import AuditLog, Organisation, User
-from .permissions import IsAxiomVaultStaff, PasswordChangeNotRequired
+from .permissions import OWNER_ONLY_MESSAGE, IsAxiomVaultStaff, IsPlatformOwner, PasswordChangeNotRequired
+from .serializers import EMAIL_TAKEN_MESSAGE
 from .serializers import AdminLoginSerializer, LogoutSerializer
 from .services import (
     INVALID_CREDENTIALS_MESSAGE,
@@ -31,7 +39,10 @@ from .services import (
     LOGOUT_TOKEN_INVALID_MESSAGE,
     LOGOUT_WRONG_ACCOUNT_MESSAGE,
     NOT_ADMIN_MESSAGE,
+    DEACTIVATED_RESET_MESSAGE,
     ORGANISATION_TAKEN_MESSAGE,
+    SUPER_ADMIN_EXISTS_MESSAGE,
+    AdminAccountService,
     AuthService,
     blacklist_all_refresh_tokens,
 )
@@ -44,7 +55,7 @@ AdminLoginResponse = inline_serializer(
         "access": serializers.CharField(help_text="Access token, valid 30 minutes. Send it as `Authorization: Bearer <access>`."),
         "refresh": serializers.CharField(help_text="Refresh token, valid 1 day. Use it with `POST /api/v1/auth/token/refresh/`."),
         "user": inline_serializer(
-            name="AdminUser",
+            name="AdminSignInUser",
             fields={
                 "id": serializers.UUIDField(help_text="The staff member's ID."),
                 "email": serializers.EmailField(help_text="Login email."),
@@ -457,3 +468,434 @@ class OrganisationAdminViewSet(viewsets.GenericViewSet):
                 request=request, details={"previous_reason": organisation.suspension_reason},
             )
         return self._detail(self._fresh(organisation))
+
+
+# ---- 21: users and staff (ACP-02) ----
+
+USER_EXAMPLE = {
+    "id": "7c1e2f4a-9b3d-4e6f-8a2c-1d5b7e9f0a3c", "email": "ada.obi@ikejacoop.ng", "full_name": "Ada Obi",
+    "account_type": "team_member", "role": "Payroll Analyst", "phone_number": "+2348031234567",
+    "organisation": {"id": "b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d", "name": "Ikeja Cooperative", "status": "active"},
+    "is_active": True, "must_change_password": False, "profile_picture": None,
+    "date_joined": "2026-10-05T09:00:00Z", "last_login": "2026-10-21T08:30:00Z",
+}
+STAFF_EXAMPLE = {
+    "id": "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d", "email": "kemi@axiomvault.ng", "full_name": "Kemi Support",
+    "admin_role": "staff", "is_active": True, "must_change_password": True, "profile_picture": None,
+    "date_joined": "2026-10-22T09:00:00Z", "last_login": None,
+}
+OWNER_ONLY_RESPONSE = OpenApiResponse(
+    response=OpenApiTypes.OBJECT,
+    examples=[
+        OpenApiExample("Not staff", value={"error": NOT_ADMIN_MESSAGE, "code": "not_admin"}),
+        OpenApiExample("Staff, not owner", value={"error": OWNER_ONLY_MESSAGE, "code": "owner_only"}),
+    ],
+)
+ACCOUNT_ID_PARAM = OpenApiParameter("id", OpenApiTypes.UUID, OpenApiParameter.PATH, description="The account's ID.")
+ACCOUNT_404 = OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Not found", value={"detail": "No account with this ID."})])
+RESET_SENT_MESSAGE = "A password reset code has been emailed to {email}."
+
+
+class _AccountAdminViewSet(viewsets.GenericViewSet):
+    """Shared actions for the Users and Staff screens. Subclasses set `kind`, the queryset, and serializers."""
+
+    kind = "user"
+    row_serializer = AdminUserSerializer
+    update_serializer = AdminUserUpdateSerializer
+    queryset = User.objects.none()  # Only tells Swagger the model; requests use get_queryset().
+
+    def get_object(self):
+        try:
+            account = self.get_queryset().filter(pk=uuid.UUID(str(self.kwargs["pk"]))).first()
+        except ValueError:
+            account = None
+        if account is None:
+            raise Http404("No account with this ID.")
+        return account
+
+    def _audit(self, action, account, request, **details):
+        AuditLog.record(
+            action, actor=request.user, target=account, organisation=account.organisation, request=request,
+            details={"kind": self.kind, "email": account.email, **details},
+        )
+
+    def _retrieve(self, request):
+        return Response(self.row_serializer(self.get_object()).data)
+
+    def _update(self, request):
+        account = self.get_object()
+        serializer = self.update_serializer(account, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        changed = {k: v for k, v in serializer.validated_data.items() if getattr(account, k) != (v.strip() if isinstance(v, str) else v)}
+        if changed:
+            with transaction.atomic():
+                for name, value in changed.items():
+                    setattr(account, name, value.strip() if isinstance(value, str) else value)
+                try:
+                    account.save(update_fields=list(changed))
+                except IntegrityError:
+                    raise serializers.ValidationError({"email": [EMAIL_TAKEN_MESSAGE]})
+                self._audit(AuditLog.USER_UPDATED, account, request, fields=sorted(changed))
+        return Response(self.row_serializer(account).data)
+
+    def _set_active(self, request, active):
+        account = self.get_object()
+        if account.pk == request.user.pk:
+            raise serializers.ValidationError({"error": "You can't change your own account here."})
+        if account.is_active != active:
+            with transaction.atomic():
+                account.is_active = active
+                account.save(update_fields=["is_active"])
+                if not active:
+                    blacklist_all_refresh_tokens(account)
+                self._audit(AuditLog.USER_REACTIVATED if active else AuditLog.USER_DEACTIVATED, account, request)
+        return Response(self.row_serializer(account).data)
+
+    def _reset_password(self, request):
+        account = self.get_object()
+        AdminAccountService.send_password_reset(account)
+        self._audit(AuditLog.PASSWORD_RESET_SENT, account, request)
+        return Response({"message": RESET_SENT_MESSAGE.format(email=account.email)})
+
+
+class AdminUserViewSet(_AccountAdminViewSet):
+    """Admin Control Panel: Users screen (Cooperative accounts in every organisation)."""
+
+    permission_classes = [IsAuthenticated, PasswordChangeNotRequired, IsAxiomVaultStaff]
+    serializer_class = AdminUserSerializer
+
+    def get_queryset(self):
+        # Only Cooperative accounts; staff and the owner are managed on the Staff screen.
+        return User.objects.filter(organisation__isnull=False, is_staff=False).select_related("organisation").order_by("-date_joined")
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="List users",
+        description=(
+            "**Users screen** of the Admin Control Panel: Cooperative accounts (super admins and team members) in "
+            "every organisation, newest first. AxiomVault staff accounts are on the Staff screen instead.\n\n"
+            "**Filters** (optional, combined): `organisation` (an organisation ID), `account_type` (`super_admin` or "
+            "`team_member`), `is_active` (`true` or `false`), `search` (part of the name or email). An invalid value "
+            "is 400.\n\n"
+            "**Paginated:** 20 a page; `?page=2`, `?page_size=` up to 100.\n\n" + ADMIN_AUTH_NOTE
+        ),
+        parameters=[
+            OpenApiParameter("organisation", OpenApiTypes.UUID, description="Only this organisation's users."),
+            OpenApiParameter("account_type", OpenApiTypes.STR, description="`super_admin` or `team_member`."),
+            OpenApiParameter("is_active", OpenApiTypes.BOOL, description="`true` or `false`."),
+            OpenApiParameter("search", OpenApiTypes.STR, description="Part of the name or email."),
+            OpenApiParameter("page", OpenApiTypes.INT, description="Page number, from 1."),
+            OpenApiParameter("page_size", OpenApiTypes.INT, description="Items per page, default 20, at most 100."),
+        ],
+        responses={
+            200: OpenApiResponse(response=AdminUserSerializer(many=True), examples=[OpenApiExample("Users", value=_paged([USER_EXAMPLE]))]),
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Bad filter", value={"account_type": ['"staff" is not a valid choice.']})]),
+            401: ADMIN_401, 403: ADMIN_403,
+        },
+    )
+    def list(self, request):
+        filters = AdminUserFilterSerializer(data=request.query_params)
+        filters.is_valid(raise_exception=True)
+        f = filters.validated_data
+        users = self.get_queryset()
+        if f.get("organisation"):
+            users = users.filter(organisation_id=f["organisation"])
+        if f.get("account_type"):
+            users = users.filter(account_type=f["account_type"])
+        if f.get("is_active") is not None:
+            users = users.filter(is_active=f["is_active"])
+        if f.get("search", "").strip():
+            text = f["search"].strip()
+            users = users.filter(Q(full_name__icontains=text) | Q(email__icontains=text))
+        page = self.paginate_queryset(users)
+        return self.get_paginated_response(AdminUserSerializer(page, many=True).data)
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Create a user",
+        description=(
+            "**Add User.** Creates a Cooperative account in any organisation, for example its first super admin "
+            "when the organisation was created from the panel.\n\n"
+            "**Fields:** `organisation_id`, `account_type` (`super_admin` or `team_member`; one super admin per "
+            "organisation), `full_name`, `email` (unique), `password` (temporary; share it yourself, no email is "
+            "sent), optional `phone_number` and `role`.\n\n"
+            "The account is ready to use; the person must replace the temporary password on first login "
+            "(`must_change_password: true`). 201 returns the user. Recorded in the audit log.\n\n" + ADMIN_AUTH_NOTE
+        ),
+        request=AdminUserCreateSerializer,
+        examples=[OpenApiExample("Super admin", value={
+            "organisation_id": "b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d", "account_type": "super_admin",
+            "full_name": "Ngozi Okafor", "email": "ngozi@ikejacoop.ng", "password": "Temp-Pass-2026!", "phone_number": "+2348031234567",
+        }, request_only=True)],
+        responses={
+            201: OpenApiResponse(response=AdminUserSerializer, examples=[OpenApiExample("Created", value={**USER_EXAMPLE, "must_change_password": True, "last_login": None})]),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                examples=[
+                    OpenApiExample("Email taken", value={"email": [EMAIL_TAKEN_MESSAGE]}),
+                    OpenApiExample("Second super admin", value={"account_type": [SUPER_ADMIN_EXISTS_MESSAGE]}),
+                    OpenApiExample("Unknown organisation", value={"organisation_id": ["No organisation with this ID."]}),
+                    OpenApiExample("Weak password", value={"password": ["This password is too common."]}),
+                ],
+            ),
+            401: ADMIN_401, 403: ADMIN_403,
+        },
+    )
+    def create(self, request):
+        serializer = AdminUserCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        organisation = Organisation.objects.filter(pk=data["organisation_id"]).first()
+        if organisation is None:
+            raise serializers.ValidationError({"organisation_id": ["No organisation with this ID."]})
+        if data["account_type"] == User.SUPER_ADMIN and organisation.users.filter(account_type=User.SUPER_ADMIN).exists():
+            raise serializers.ValidationError({"account_type": [SUPER_ADMIN_EXISTS_MESSAGE]})
+        account = AdminAccountService.create(data, organisation=organisation, account_type=data["account_type"])
+        self._audit(AuditLog.USER_CREATED, account, request, account_type=account.account_type)
+        return Response(AdminUserSerializer(account).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(tags=[ADMIN_TAG], summary="View a user", description="One Cooperative account.\n\n" + ADMIN_AUTH_NOTE,
+                   parameters=[ACCOUNT_ID_PARAM], responses={200: OpenApiResponse(response=AdminUserSerializer, examples=[OpenApiExample("User", value=USER_EXAMPLE)]), 401: ADMIN_401, 403: ADMIN_403, 404: ACCOUNT_404})
+    def retrieve(self, request, pk=None):
+        return self._retrieve(request)
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Edit a user",
+        description=(
+            "**Edit User.** Changes only the fields sent: `full_name`, `email` (unique), `phone_number`, `role` "
+            "(`\"\"` clears the last two). Account type and organisation can't be changed here. 200 returns the user. "
+            "Recorded in the audit log with the changed fields.\n\n" + ADMIN_AUTH_NOTE
+        ),
+        parameters=[ACCOUNT_ID_PARAM],
+        request=AdminUserUpdateSerializer,
+        examples=[OpenApiExample("Edit", value={"role": "Senior Payroll Analyst"}, request_only=True)],
+        responses={
+            200: OpenApiResponse(response=AdminUserSerializer, examples=[OpenApiExample("Edited", value={**USER_EXAMPLE, "role": "Senior Payroll Analyst"})]),
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Email taken", value={"email": [EMAIL_TAKEN_MESSAGE]})]),
+            401: ADMIN_401, 403: ADMIN_403, 404: ACCOUNT_404,
+        },
+    )
+    def partial_update(self, request, pk=None):
+        return self._update(request)
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Deactivate a user",
+        description=(
+            "**Deactivate.** The user can't log in any more and is signed out everywhere at once; their history is "
+            "kept. Doing it twice is fine. 200 returns the user with `is_active: false`.\n\n" + ADMIN_AUTH_NOTE
+        ),
+        parameters=[ACCOUNT_ID_PARAM], request=None,
+        responses={200: OpenApiResponse(response=AdminUserSerializer, examples=[OpenApiExample("Deactivated", value={**USER_EXAMPLE, "is_active": False})]), 401: ADMIN_401, 403: ADMIN_403, 404: ACCOUNT_404},
+    )
+    @action(detail=True, methods=["post"])
+    def deactivate(self, request, pk=None):
+        return self._set_active(request, False)
+
+    @extend_schema(
+        tags=[ADMIN_TAG], summary="Reactivate a user",
+        description="**Reactivate.** The user can log in again. 200 returns the user with `is_active: true`.\n\n" + ADMIN_AUTH_NOTE,
+        parameters=[ACCOUNT_ID_PARAM], request=None,
+        responses={200: OpenApiResponse(response=AdminUserSerializer, examples=[OpenApiExample("Reactivated", value=USER_EXAMPLE)]), 401: ADMIN_401, 403: ADMIN_403, 404: ACCOUNT_404},
+    )
+    @action(detail=True, methods=["post"])
+    def reactivate(self, request, pk=None):
+        return self._set_active(request, True)
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Send a password reset to a user",
+        description=(
+            "**Reset Password.** Emails the user the same 6-digit reset code as the app's Forgot Password screen; "
+            "they finish on the app's Verify Code and New Password screens (the code lasts 10 minutes). Staff never "
+            "see or set the new password.\n\n"
+            "**Errors:** a second request within 60 seconds is 429 with `retry_after` (seconds); a deactivated "
+            "account is 400 (reactivate first); 503 when the code can't be sent right now.\n\n" + ADMIN_AUTH_NOTE
+        ),
+        parameters=[ACCOUNT_ID_PARAM], request=None,
+        responses={
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Sent", value={"message": RESET_SENT_MESSAGE.format(email="ada.obi@ikejacoop.ng")})]),
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Deactivated", value={"error": [DEACTIVATED_RESET_MESSAGE]})]),
+            401: ADMIN_401, 403: ADMIN_403, 404: ACCOUNT_404,
+            429: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Too soon", value={"error": "Please wait before requesting a new code.", "retry_after": 42})]),
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="reset-password")
+    def reset_password(self, request, pk=None):
+        return self._reset_password(request)
+
+
+class StaffAdminViewSet(_AccountAdminViewSet):
+    """Admin Control Panel: Staff screen. The platform owner only."""
+
+    kind = "staff"
+    row_serializer = StaffSerializer
+    update_serializer = StaffUpdateSerializer
+    permission_classes = [IsAuthenticated, PasswordChangeNotRequired, IsAxiomVaultStaff, IsPlatformOwner]
+    serializer_class = StaffSerializer
+
+    def get_queryset(self):
+        # Staff accounts only; owner accounts can't be edited or deactivated from here.
+        return User.objects.filter(is_staff=True, is_superuser=False).order_by("-date_joined")
+
+    OWNER_NOTE = (
+        "**Authentication:** the platform **owner's** admin access token. Staff get 403 `owner_only`; Cooperative "
+        "accounts get 403 `not_admin`. Owner accounts are never listed or changed here."
+    )
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="List staff accounts",
+        description=(
+            "**Staff screen** (owner only): AxiomVault support and operations accounts, newest first. "
+            "`search` matches part of the name or email.\n\n**Paginated:** 20 a page.\n\n" + OWNER_NOTE
+        ),
+        parameters=[
+            OpenApiParameter("search", OpenApiTypes.STR, description="Part of the name or email."),
+            OpenApiParameter("page", OpenApiTypes.INT, description="Page number, from 1."),
+            OpenApiParameter("page_size", OpenApiTypes.INT, description="Items per page, default 20, at most 100."),
+        ],
+        responses={200: OpenApiResponse(response=StaffSerializer(many=True), examples=[OpenApiExample("Staff", value=_paged([STAFF_EXAMPLE]))]), 401: ADMIN_401, 403: OWNER_ONLY_RESPONSE},
+    )
+    def list(self, request):
+        staff = self.get_queryset()
+        text = request.query_params.get("search", "").strip()
+        if text:
+            staff = staff.filter(Q(full_name__icontains=text) | Q(email__icontains=text))
+        page = self.paginate_queryset(staff)
+        return self.get_paginated_response(StaffSerializer(page, many=True).data)
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Create a staff account",
+        description=(
+            "**Add Staff** (owner only). Creates an AxiomVault staff account that can sign in to the Admin Control "
+            "Panel (`admin_role: staff`). Fields: `full_name`, `email` (unique), `password` (temporary; share it "
+            "yourself). They must replace it on first login. 201 returns the account. Recorded in the audit log.\n\n"
+            + OWNER_NOTE
+        ),
+        request=StaffCreateSerializer,
+        examples=[OpenApiExample("Create", value={"full_name": "Kemi Support", "email": "kemi@axiomvault.ng", "password": "Temp-Pass-2026!"}, request_only=True)],
+        responses={
+            201: OpenApiResponse(response=StaffSerializer, examples=[OpenApiExample("Created", value=STAFF_EXAMPLE)]),
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Email taken", value={"email": [EMAIL_TAKEN_MESSAGE]})]),
+            401: ADMIN_401, 403: OWNER_ONLY_RESPONSE,
+        },
+    )
+    def create(self, request):
+        serializer = StaffCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        account = AdminAccountService.create(serializer.validated_data, is_staff=True)
+        self._audit(AuditLog.USER_CREATED, account, request)
+        return Response(StaffSerializer(account).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(tags=[ADMIN_TAG], summary="View a staff account", description="One staff account (owner only).\n\n" + OWNER_NOTE,
+                   parameters=[ACCOUNT_ID_PARAM], responses={200: OpenApiResponse(response=StaffSerializer, examples=[OpenApiExample("Staff", value=STAFF_EXAMPLE)]), 401: ADMIN_401, 403: OWNER_ONLY_RESPONSE, 404: ACCOUNT_404})
+    def retrieve(self, request, pk=None):
+        return self._retrieve(request)
+
+    @extend_schema(
+        tags=[ADMIN_TAG], summary="Edit a staff account",
+        description="Changes `full_name` and/or `email` (unique). 200 returns the account. Recorded in the audit log.\n\n" + OWNER_NOTE,
+        parameters=[ACCOUNT_ID_PARAM], request=StaffUpdateSerializer,
+        examples=[OpenApiExample("Edit", value={"full_name": "Kemi Adeyemi"}, request_only=True)],
+        responses={200: OpenApiResponse(response=StaffSerializer, examples=[OpenApiExample("Edited", value={**STAFF_EXAMPLE, "full_name": "Kemi Adeyemi"})]),
+                   400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Email taken", value={"email": [EMAIL_TAKEN_MESSAGE]})]),
+                   401: ADMIN_401, 403: OWNER_ONLY_RESPONSE, 404: ACCOUNT_404},
+    )
+    def partial_update(self, request, pk=None):
+        return self._update(request)
+
+    @extend_schema(
+        tags=[ADMIN_TAG], summary="Deactivate a staff account",
+        description="They can't sign in to the panel any more and are signed out everywhere. 200 returns the account.\n\n" + OWNER_NOTE,
+        parameters=[ACCOUNT_ID_PARAM], request=None,
+        responses={200: OpenApiResponse(response=StaffSerializer, examples=[OpenApiExample("Deactivated", value={**STAFF_EXAMPLE, "is_active": False})]), 401: ADMIN_401, 403: OWNER_ONLY_RESPONSE, 404: ACCOUNT_404},
+    )
+    @action(detail=True, methods=["post"])
+    def deactivate(self, request, pk=None):
+        return self._set_active(request, False)
+
+    @extend_schema(
+        tags=[ADMIN_TAG], summary="Reactivate a staff account",
+        description="They can sign in again. 200 returns the account.\n\n" + OWNER_NOTE,
+        parameters=[ACCOUNT_ID_PARAM], request=None,
+        responses={200: OpenApiResponse(response=StaffSerializer, examples=[OpenApiExample("Reactivated", value=STAFF_EXAMPLE)]), 401: ADMIN_401, 403: OWNER_ONLY_RESPONSE, 404: ACCOUNT_404},
+    )
+    @action(detail=True, methods=["post"])
+    def reactivate(self, request, pk=None):
+        return self._set_active(request, True)
+
+    @extend_schema(
+        tags=[ADMIN_TAG], summary="Send a password reset to a staff member",
+        description=(
+            "Emails them the app's 6-digit reset code; they finish on the reset screens. 429 with `retry_after` "
+            "within 60 seconds of the last code; 400 when deactivated.\n\n" + OWNER_NOTE
+        ),
+        parameters=[ACCOUNT_ID_PARAM], request=None,
+        responses={200: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Sent", value={"message": RESET_SENT_MESSAGE.format(email="kemi@axiomvault.ng")})]),
+                   400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Deactivated", value={"error": [DEACTIVATED_RESET_MESSAGE]})]),
+                   401: ADMIN_401, 403: OWNER_ONLY_RESPONSE, 404: ACCOUNT_404,
+                   429: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Too soon", value={"error": "Please wait before requesting a new code.", "retry_after": 42})])},
+    )
+    @action(detail=True, methods=["post"], url_path="reset-password")
+    def reset_password(self, request, pk=None):
+        return self._reset_password(request)
+
+
+ROLES = [
+    {
+        "role": "owner", "panel": "admin",
+        "description": "The AxiomVault platform owner (Django superuser). One person in practice.",
+        "permissions": [
+            "Everything AxiomVault staff can do",
+            "Create, edit, deactivate, and reset staff accounts",
+        ],
+    },
+    {
+        "role": "staff", "panel": "admin",
+        "description": "AxiomVault support and operations, created by the owner.",
+        "permissions": [
+            "Sign in to the Admin Control Panel",
+            "List, create, rename, suspend, and reactivate organisations",
+            "Manage Cooperative users in every organisation and send them password resets",
+        ],
+    },
+    {
+        "role": "super_admin", "panel": "app",
+        "description": "Represents a Cooperative; signs up and creates it. One per organisation.",
+        "permissions": [
+            "Everything a team member can do, in their own organisation",
+            "Add, edit, deactivate, and reactivate team members",
+        ],
+    },
+    {
+        "role": "team_member", "panel": "app",
+        "description": "A Cooperative's staff, added by its super admin. Their job title is free text and grants nothing.",
+        "permissions": [
+            "Upload payroll, vendor, and payment files and files for evidence",
+            "Work alerts and cases: review, notes, comments, evidence, escalation",
+            "See the dashboard and analytics",
+        ],
+    },
+]
+
+
+class RolesViewSet(viewsets.ViewSet):
+    """Admin Control Panel: the roles and what each may do (read-only)."""
+
+    permission_classes = [IsAuthenticated, PasswordChangeNotRequired, IsAxiomVaultStaff]
+
+    @extend_schema(
+        tags=[ADMIN_TAG],
+        summary="Roles and permissions",
+        description=(
+            "**Roles screen.** The four roles on AxiomVault and what each may do. They are fixed rules, not editable "
+            "settings: `panel` says where the role signs in (`admin` = Admin Control Panel, `app` = the Cooperative "
+            "app). A team member's job title (`role` on the user) is a label only.\n\n" + ADMIN_AUTH_NOTE
+        ),
+        responses={200: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Roles", value={"roles": ROLES})]), 401: ADMIN_401, 403: ADMIN_403},
+    )
+    def list(self, request):
+        return Response({"roles": ROLES})

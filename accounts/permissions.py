@@ -40,3 +40,16 @@ class IsAxiomVaultStaff(BasePermission):
     def has_permission(self, request, view):
         user = request.user
         return bool(user and user.is_authenticated and user.is_staff)
+
+
+OWNER_ONLY_MESSAGE = "Only the platform owner can manage staff accounts."
+
+
+class IsPlatformOwner(BasePermission):
+    """Staff management: the platform owner (Django `is_superuser`) only (decided 2026-10-20)."""
+
+    message = {"error": OWNER_ONLY_MESSAGE, "code": "owner_only"}
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and user.is_superuser)
