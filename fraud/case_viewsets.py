@@ -32,8 +32,20 @@ from .case_serializers import (
     EvidenceCreateSerializer,
     evidence_item,
 )
+from .investigation_serializers import InvestigationSerializer
 from .models import Alert, AlertEvent, Case, CaseComment, CaseEvent, CaseEvidence
-from .viewsets import ALERT_EXAMPLE, FORBIDDEN, PAGINATION_NOTE, REFERENCE_PATTERN, REVIEWER_INVALID_MESSAGE, UNAUTHORIZED, paged
+from .services.investigation import InvestigationService
+from .viewsets import (
+    ALERT_EXAMPLE,
+    FORBIDDEN,
+    INVESTIGATION_EXAMPLE,
+    INVESTIGATION_NOTE,
+    PAGINATION_NOTE,
+    REFERENCE_PATTERN,
+    REVIEWER_INVALID_MESSAGE,
+    UNAUTHORIZED,
+    paged,
+)
 
 User = get_user_model()
 CASE_REFERENCE_PATTERN = re.compile(r"CASE-(\d{4,})", re.IGNORECASE)
@@ -485,6 +497,33 @@ class CaseViewSet(viewsets.GenericViewSet):
     def history(self, request, reference=None):
         page = self.paginate_queryset(self.get_object().events.select_related("actor").order_by("created_at"))
         return self.get_paginated_response(CaseEventSerializer(page, many=True).data)
+
+    @extend_schema(
+        tags=["Cases"],
+        summary="Investigate a case",
+        description=(
+            "**Investigation drill-down on the Case detail screen** (related entities, connected transactions, "
+            "transaction analysis, pattern detection, transaction timeline). Read-only. Covers **every alert linked "
+            "to the case** together: `alerts` lists them, the analysis adds them up (each transaction once), and "
+            "`linked_alerts` holds only alerts outside this case. The Linked Alerts box shows `alerts`; "
+            "`linked_alerts` is the \"other alerts about these people\" list.\n\n"
+            + INVESTIGATION_NOTE + "\n\n" + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        responses={
+            200: OpenApiResponse(
+                response=InvestigationSerializer,
+                examples=[OpenApiExample("Investigation", value={**INVESTIGATION_EXAMPLE, "subject": {"type": "case", "reference": "CASE-0001"}})],
+            ),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @action(detail=True, methods=["get"])
+    def investigation(self, request, reference=None):
+        case = self.get_object()
+        alerts = list(case.alerts.select_related("assigned_reviewer").order_by("number"))
+        result = InvestigationService.build(request.user.organisation, alerts, {"type": "case", "reference": case.reference})
+        return Response(InvestigationSerializer(result).data, status=status.HTTP_200_OK)
 
     @extend_schema(
         tags=["Cases"],
