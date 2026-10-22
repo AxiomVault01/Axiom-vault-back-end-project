@@ -25,6 +25,9 @@ class DataUpload(models.Model):
     # The original file, kept private on Cloudinary as evidence. Empty for uploads made before 7d.
     source_public_id = models.CharField(max_length=255, blank=True, default="")
     file_size = models.PositiveIntegerField(default=0, help_text="Size of the original file in bytes.")
+    # Payroll only: the pay period the uploader set (decided by the client 2026-10-22).
+    period_start = models.DateField(null=True, blank=True)
+    period_end = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -46,11 +49,13 @@ class Payroll(models.Model):
     employee_name = models.CharField(max_length=255)
     department = models.CharField(max_length=255)
 
-    salary_basic = models.DecimalField(max_digits=12, decimal_places=2)
+    # Optional since the frontend template has one "Salary Amount", stored as net_salary (2026-10-22).
+    salary_basic = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     net_salary = models.DecimalField(max_digits=12, decimal_places=2)
 
     account_number = models.CharField(max_length=20)
-    pay_period = models.CharField(max_length=20)
+    # The upload's pay period as text, e.g. "2026-10-02 to 2026-10-07"; groups rows for the bank account rule.
+    pay_period = models.CharField(max_length=30)
     payment_date = models.DateField()
 
     # ⚙️ EXTENDED
@@ -65,6 +70,9 @@ class Payroll(models.Model):
     location = models.CharField(max_length=100, null=True, blank=True)
     supervisor_id = models.CharField(max_length=100, null=True, blank=True)
     employment_type = models.CharField(max_length=50, null=True, blank=True)
+    employment_status = models.CharField(max_length=50, blank=True, default="")
+    exit_date = models.DateField(null=True, blank=True)
+    approver_id = models.CharField(max_length=100, blank=True, default="")
     grade_level = models.CharField(max_length=50, null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

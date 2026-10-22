@@ -13,7 +13,7 @@ from config.file_storage import StorageUnavailable
 from fraud.services.detection import RULES, run_detection
 
 from .models import Payment, Payroll, Vendor
-from .serializers import FileUploadSerializer
+from .serializers import PERIOD_ORDER_MESSAGE, FileUploadSerializer, PayrollUploadSerializer
 from .services.ingestion_service import MAX_ERRORS_SHOWN, MAX_ROWS, ROWS_INVALID_MESSAGE, IngestionService, UploadRejected
 from .services.standardiser import PAYMENT_SCHEMA, PAYROLL_SCHEMA, VENDOR_SCHEMA
 
@@ -71,6 +71,8 @@ def _response_schema(kind_label):
                         help_text="Size of the original file in bytes. The file itself is kept privately as evidence."
                     ),
                     "created_at": serializers.DateTimeField(help_text="When the upload was saved (ISO 8601)."),
+                    "pay_period_start": serializers.DateField(allow_null=True, help_text="Payroll: first day of the pay period the uploader set. `null` for other kinds."),
+                    "pay_period_end": serializers.DateField(allow_null=True, help_text="Payroll: last day of the pay period. `null` for other kinds."),
                 },
             ),
             "ignored_columns": serializers.ListField(
@@ -96,7 +98,20 @@ def _response_schema(kind_label):
     )
 
 
-def upload_docs(schema, label, screen_note, example_errors, duplicate_note, saved_example):
+PERIOD_FIELDS = {
+    "pay_period_start": {"type": "string", "format": "date", "description": "First day of the pay period, `2026-10-02` or `02/10/2026`."},
+    "pay_period_end": {"type": "string", "format": "date", "description": "Last day of the pay period (same day or later)."},
+}
+PERIOD_NOTE = (
+    "**Pay period (payroll only).** Besides `file`, send `pay_period_start` and `pay_period_end`: the date range "
+    "this payroll covers, chosen by the uploader (for example the 2nd to the 7th). It is not a column in the file. "
+    "Both are required and the end cannot be before the start (400 otherwise). Every row is filed under that period, "
+    "and **any payment dated before or after it is flagged** as a \"Payment Outside Pay Period\" alert; the file is "
+    "still saved.\n\n"
+)
+
+
+def upload_docs(schema, label, screen_note, example_errors, duplicate_note, saved_example, period=False):
     """Full Swagger docs for one upload endpoint, built from its schema so they never drift apart."""
     return extend_schema(
         tags=["Ingestion"],
@@ -110,7 +125,8 @@ def upload_docs(schema, label, screen_note, example_errors, duplicate_note, save
             f"10 MB and {MAX_ROWS:,} rows. Row 1 must hold the column names. In Excel, format account number "
             "columns as **Text** before typing, or numbers like `0123456789` lose the leading zero. Old `.xls` "
             "files are refused.\n\n"
-            "**Columns.** Names are matched ignoring letter case, spaces, and hyphens. Other columns are "
+            + (PERIOD_NOTE if period else "")
+            + "**Columns.** Names are matched ignoring letter case, spaces, and hyphens. Other columns are "
             "ignored and listed in `ignored_columns`.\n\n"
             + _column_table(schema)
             + "\n\n**Other rules**\n"
@@ -131,8 +147,11 @@ def upload_docs(schema, label, screen_note, example_errors, duplicate_note, save
         request={
             "multipart/form-data": {
                 "type": "object",
-                "properties": {"file": {"type": "string", "format": "binary", "description": "The .csv or .xlsx file."}},
-                "required": ["file"],
+                "properties": {
+                    "file": {"type": "string", "format": "binary", "description": "The .csv or .xlsx file."},
+                    **(PERIOD_FIELDS if period else {}),
+                },
+                "required": ["file", *(PERIOD_FIELDS if period else [])],
             }
         },
         responses={
@@ -158,6 +177,10 @@ def upload_docs(schema, label, screen_note, example_errors, duplicate_note, save
                     ),
                     OpenApiExample("Wrong file type", value={"error": "Upload a .csv or .xlsx file."}),
                     OpenApiExample("No file", value={"file": ["No file was submitted."]}),
+                    *([
+                        OpenApiExample("Pay period missing", value={"pay_period_start": ["This field is required."], "pay_period_end": ["This field is required."]}),
+                        OpenApiExample("Pay period backwards", value={"pay_period_end": [PERIOD_ORDER_MESSAGE]}),
+                    ] if period else []),
                 ],
             ),
             401: OpenApiResponse(
@@ -187,7 +210,7 @@ def upload_docs(schema, label, screen_note, example_errors, duplicate_note, save
     )
 
 
-def _saved(kind, name, rows, size, ignored, detection):
+def _saved(kind, name, rows, size, ignored, detection, period=(None, None)):
     return {
         "upload": {
             "id": "9b2f6c1e-4d3a-4f7b-8e2d-1a5c7b9e0f3d",
@@ -196,6 +219,8 @@ def _saved(kind, name, rows, size, ignored, detection):
             "row_count": rows,
             "file_size": size,
             "created_at": "2026-10-14T10:15:00Z",
+            "pay_period_start": period[0],
+            "pay_period_end": period[1],
         },
         "ignored_columns": ignored,
         "detection": detection,
@@ -206,15 +231,21 @@ class IngestionViewSet(viewsets.ViewSet):
     parser_classes = [MultiPartParser, FormParser]
     permission_classes = [IsAuthenticated, PasswordChangeNotRequired, BelongsToOrganisation]
 
-    def _upload(self, request, schema, row_model, audit_action):
-        serializer = FileUploadSerializer(data=request.data)
+    def _upload(self, request, schema, row_model, audit_action, with_period=False):
+        serializer = (PayrollUploadSerializer if with_period else FileUploadSerializer)(data=request.data)
         serializer.is_valid(raise_exception=True)
-        file = serializer.validated_data["file"]
+        data = serializer.validated_data
+        file = data["file"]
         if file.size > MAX_FILE_BYTES:
             return Response({"error": FILE_TOO_LARGE_MESSAGE}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
+        row_values = upload_values = None
+        if with_period:
+            start, end = data["pay_period_start"], data["pay_period_end"]
+            row_values = {"pay_period": f"{start.isoformat()} to {end.isoformat()}"}
+            upload_values = {"period_start": start, "period_end": end}
         try:
-            upload, ignored_columns = IngestionService.upload(file, request.user, schema, row_model)
+            upload, ignored_columns = IngestionService.upload(file, request.user, schema, row_model, row_values, upload_values)
         except UploadRejected as exc:
             return Response(exc.body, status=status.HTTP_400_BAD_REQUEST)
         except StorageUnavailable:
@@ -236,6 +267,8 @@ class IngestionViewSet(viewsets.ViewSet):
                     "row_count": upload.row_count,
                     "file_size": upload.file_size,
                     "created_at": upload.created_at,
+                    "pay_period_start": upload.period_start,
+                    "pay_period_end": upload.period_end,
                 },
                 "ignored_columns": ignored_columns,
                 "detection": self._detect(upload),
@@ -258,17 +291,23 @@ class IngestionViewSet(viewsets.ViewSet):
     @upload_docs(
         PAYROLL_SCHEMA,
         "payroll",
-        "One row per employee per pay period.",
+        "One row per employee per pay period. Follows the frontend's payroll template: Employee ID, Full Name, "
+        "Department, Position, Bank Account Number, Salary Amount (the net salary paid), Payment Date, Attendance "
+        "Days, Employment Status, Exit Date, Approver ID (required on every row).",
         [
             {"row": 5, "field": "net_salary", "error": "The amount cannot be negative."},
             {"row": 9, "field": "payment_date", "error": "Use a date like 2026-09-28 or 28/09/2026."},
+            {"row": 12, "field": "exit_date", "error": "Exit Date is required when Employment Status shows the employee has left."},
         ],
-        "The same employee, account number, and pay period twice in one file is an error.",
-        _saved("payroll", "september-payroll.xlsx", 248, 48213, ["Remarks"],
-               {"status": "completed", "alerts_created": 1, "alerts": ["ALT-0007"]}),
+        "The same employee, account number, and pay period twice in one file is an error. When Employment Status "
+        "says the employee has left (`Exited`, `Terminated`, `Resigned`, `Retired`, `Dismissed`, `Left`, or "
+        "`Inactive`, any letter case), Exit Date is required on that row.",
+        _saved("payroll", "october-payroll.xlsx", 248, 48213, ["Remarks"],
+               {"status": "completed", "alerts_created": 2, "alerts": ["ALT-0007", "ALT-0008"]}, ("2026-10-02", "2026-10-07")),
+        period=True,
     )
     def upload_payroll(self, request):
-        return self._upload(request, PAYROLL_SCHEMA, Payroll, AuditLog.PAYROLL_UPLOADED)
+        return self._upload(request, PAYROLL_SCHEMA, Payroll, AuditLog.PAYROLL_UPLOADED, with_period=True)
 
     @upload_docs(
         VENDOR_SCHEMA,
