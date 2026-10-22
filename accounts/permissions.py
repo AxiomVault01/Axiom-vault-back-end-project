@@ -2,6 +2,7 @@ from rest_framework.permissions import BasePermission
 
 SUPER_ADMIN_ONLY_MESSAGE = "Only the super admin can manage the team."
 PASSWORD_CHANGE_REQUIRED_MESSAGE = "Change your temporary password before continuing."
+ORGANISATION_SUSPENDED_MESSAGE = "Your organisation's access is suspended. Contact AxiomVault support."
 
 
 class IsSuperAdmin(BasePermission):

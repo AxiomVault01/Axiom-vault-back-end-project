@@ -16,6 +16,18 @@ class Organisation(models.Model):
     is_demo = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Suspension by AxiomVault staff (feature 20): its users can't log in or use the API.
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    STATUS_CHOICES = [(ACTIVE, "Active"), (SUSPENDED, "Suspended")]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=ACTIVE)
+    suspended_at = models.DateTimeField(null=True, blank=True)
+    suspension_reason = models.TextField(blank=True, default="")
+
+    @property
+    def is_suspended(self) -> bool:
+        return self.status == self.SUSPENDED
+
     class Meta:
         constraints = [
             models.UniqueConstraint(Lower("name"), name="unique_organisation_name_ci"),
@@ -170,6 +182,10 @@ class AuditLog(models.Model):
     VENDORS_UPLOADED = "vendors_uploaded"
     PAYMENTS_UPLOADED = "payments_uploaded"
     FILE_UPLOADED = "file_uploaded"
+    ORGANISATION_CREATED = "organisation_created"
+    ORGANISATION_UPDATED = "organisation_updated"
+    ORGANISATION_SUSPENDED = "organisation_suspended"
+    ORGANISATION_REACTIVATED = "organisation_reactivated"
     PROFILE_UPDATED = "profile_updated"
     SETTINGS_UPDATED = "settings_updated"
     PROFILE_PICTURE_UPDATED = "profile_picture_updated"
@@ -199,6 +215,10 @@ class AuditLog(models.Model):
         (VENDORS_UPLOADED, "Uploaded a vendors file"),
         (PAYMENTS_UPLOADED, "Uploaded a payments file"),
         (FILE_UPLOADED, "Uploaded a file"),
+        (ORGANISATION_CREATED, "Created an organisation"),
+        (ORGANISATION_UPDATED, "Edited an organisation"),
+        (ORGANISATION_SUSPENDED, "Suspended an organisation"),
+        (ORGANISATION_REACTIVATED, "Reactivated an organisation"),
         (PROFILE_UPDATED, "Edited their profile"),
         (SETTINGS_UPDATED, "Changed their settings"),
         (PROFILE_PICTURE_UPDATED, "Changed their profile picture"),
