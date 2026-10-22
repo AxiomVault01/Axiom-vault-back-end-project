@@ -18,6 +18,7 @@ from ingestion.models import DataUpload, Payment, Payroll, Vendor
 logger = logging.getLogger(__name__)
 
 LARGE_DUPLICATE_AMOUNT = Decimal("1000000")  # NGN
+FAR_OUTSIDE_DAYS = 7  # A payment more than this many days outside the pay period is high severity.
 
 
 def _money(amount) -> str:
@@ -46,7 +47,7 @@ def duplicate_bank_accounts(organisation, upload) -> list[dict]:
         findings.append({
             "rule": Alert.DUPLICATE_BANK_ACCOUNT,
             "risk_type": "Duplicate Bank Account",
-            "title": f"One bank account paid to {count} employees in {pay_period}",
+            "title": f"One bank account paid to {count} employees in the {pay_period} pay period",
             "explanation": (
                 f"Account {account_number} received the {pay_period} salary of {count} different employees "
                 f"({names}). A real employee is normally paid into their own account, so shared accounts can "
@@ -149,8 +150,73 @@ def duplicate_payments(organisation, upload) -> list[dict]:
     return findings
 
 
+def payments_outside_pay_period(organisation, upload) -> list[dict]:
+    """Salaries dated before or after the pay period the uploader set (client rule, 2026-10-22).
+
+    One finding per employee per period, listing every out-of-range payment. High severity when a payment
+    came before the period started (paid early) or more than 7 days after it ended; otherwise medium.
+    """
+    start, end = upload.period_start, upload.period_end
+    if start is None or end is None:
+        return []
+    outside = defaultdict(list)
+    for row in upload.rows.exclude(payment_date__range=(start, end)).order_by("employee_id", "payment_date"):
+        outside[row.employee_id].append(row)
+    period = f"{start.isoformat()} to {end.isoformat()}"
+    findings = []
+    for employee_id, rows in outside.items():
+        first = rows[0]
+        early = [r for r in rows if r.payment_date < start]
+        late_days = max(((r.payment_date - end).days for r in rows if r.payment_date > end), default=0)
+        severity, score = ("high", 75) if early or late_days > FAR_OUTSIDE_DAYS else ("medium", 55)
+
+        def offset(row):
+            days = (start - row.payment_date).days if row.payment_date < start else (row.payment_date - end).days
+            return f"{days} day{'s' if days != 1 else ''} {'before' if row.payment_date < start else 'after'}"
+
+        when = "; ".join(f"{_money(r.net_salary)} on {r.payment_date.isoformat()} ({offset(r)} the period)" for r in rows)
+        findings.append({
+            "rule": Alert.PAYMENT_OUTSIDE_PAY_PERIOD,
+            "risk_type": "Payment Outside Pay Period",
+            "title": f"{first.employee_name} paid outside the {period} pay period",
+            "explanation": (
+                f"The pay period for this payroll was set to {period}, but {first.employee_name} ({employee_id}) was "
+                f"paid {when}. Salaries are expected inside the pay period; payments outside it can point to off-cycle "
+                "or unauthorised payouts."
+            ),
+            "severity": severity,
+            "risk_score": score,
+            "confidence": score,
+            "entity_type": "employee",
+            "entity_name": first.employee_name,
+            "entity_ref": employee_id,
+            "department": first.department,
+            "flagged_records": [
+                {
+                    "employee_id": r.employee_id,
+                    "employee_name": r.employee_name,
+                    "department": r.department,
+                    "account_number": r.account_number,
+                    "net_salary": _money(r.net_salary),
+                    "payment_date": r.payment_date.isoformat(),
+                    "pay_period": period,
+                    "outside_by": offset(r),
+                    "approver_id": r.approver_id,
+                }
+                for r in rows
+            ],
+            "timeline": [
+                {"date": start.isoformat(), "label": "Pay period starts", "detail": period},
+                {"date": end.isoformat(), "label": "Pay period ends", "detail": period},
+                *({"date": r.payment_date.isoformat(), "label": "Payment", "detail": f"{_money(r.net_salary)} ({offset(r)} the period)"} for r in rows),
+            ],
+            "fingerprint": f"{Alert.PAYMENT_OUTSIDE_PAY_PERIOD}:{period}:{employee_id}",
+        })
+    return findings
+
+
 RULES = {
-    DataUpload.PAYROLL: [duplicate_bank_accounts],
+    DataUpload.PAYROLL: [duplicate_bank_accounts, payments_outside_pay_period],
     DataUpload.PAYMENTS: [duplicate_payments],
 }
 

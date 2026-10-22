@@ -65,7 +65,8 @@ def payroll_row_check(values: dict) -> list[tuple[str, str]]:
 
 # Follows the frontend's "Required Columns (payroll)" template (2026-10-22): Employee ID, Full Name,
 # Department, Position, Bank Account Number, Salary Amount (net salary), Payment Date, Attendance Days,
-# Employment Status, Exit Date, Approver ID (required). Pay Period stays required until the client decides.
+# Employment Status, Exit Date, Approver ID (required). The pay period is not a column: the uploader sets it
+# as a date range with the upload (client decision 2026-10-22).
 PAYROLL_SCHEMA = UploadSchema(
     kind="payroll",
     fields={
@@ -79,7 +80,6 @@ PAYROLL_SCHEMA = UploadSchema(
         ),
         "net_salary": money(True, ["salary_amount", "salary", "net_pay", "net", "take_home"]),
         "payment_date": Field("date", required=True, aliases=("pay_date", "date_paid")),
-        "pay_period": text(20, True, ["period", "payroll_period", "month"]),
         "salary_basic": money(aliases=["basic_salary", "basic", "basic_pay"]),
         "allowances": money(aliases=["allowance"], blank=Decimal("0")),
         "deductions": money(aliases=["deduction"], blank=Decimal("0")),
@@ -97,8 +97,8 @@ PAYROLL_SCHEMA = UploadSchema(
         "approver_id": text(100, True, ["approver", "approved_by"]),
     },
     row_check=payroll_row_check,
-    duplicate_key=("employee_id", "account_number", "pay_period"),
-    duplicate_message="Duplicate payroll record: same employee, account number, and pay period as row {first}.",
+    duplicate_key=("employee_id", "account_number"),
+    duplicate_message="Duplicate payroll record: same employee and account number as row {first}.",
 )
 
 VENDOR_SCHEMA = UploadSchema(

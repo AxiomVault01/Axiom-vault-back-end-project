@@ -25,11 +25,12 @@ class UploadRejected(Exception):
 
 class IngestionService:
     @staticmethod
-    def upload(file, user, schema: UploadSchema, row_model) -> tuple[DataUpload, list[str]]:
+    def upload(file, user, schema: UploadSchema, row_model, row_values=None, upload_values=None) -> tuple[DataUpload, list[str]]:
         """Reads, standardises, and checks the whole file, keeps the original, then saves it all or nothing.
 
         `schema` describes the file kind; `row_model` is the model each row becomes (Payroll, Vendor,
-        Payment). Raises UploadRejected (400) or file_storage.StorageUnavailable (503); nothing is
+        Payment). `row_values` are added to every row and `upload_values` to the upload (the payroll pay
+        period). Raises UploadRejected (400) or file_storage.StorageUnavailable (503); nothing is
         saved either way.
         """
         data = file.read()  # Stored exactly as checked: the parser reads the same bytes below.
@@ -84,9 +85,10 @@ class IngestionService:
                     row_count=len(rows),
                     source_public_id=stored["public_id"],
                     file_size=stored["bytes"],
+                    **(upload_values or {}),
                 )
                 row_model.objects.bulk_create(
-                    row_model(organisation=user.organisation, upload=upload, **values) for _, values in rows
+                    row_model(organisation=user.organisation, upload=upload, **values, **(row_values or {})) for _, values in rows
                 )
         except Exception:
             # The rows were not saved, so the stored file must not linger as evidence of nothing.

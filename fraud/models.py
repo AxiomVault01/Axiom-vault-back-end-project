@@ -12,9 +12,11 @@ class Alert(models.Model):
 
     DUPLICATE_BANK_ACCOUNT = "duplicate_bank_account"
     DUPLICATE_PAYMENT = "duplicate_payment"
+    PAYMENT_OUTSIDE_PAY_PERIOD = "payment_outside_pay_period"
     RULE_CHOICES = [
         (DUPLICATE_BANK_ACCOUNT, "Duplicate Bank Account"),
         (DUPLICATE_PAYMENT, "Duplicate Payment"),
+        (PAYMENT_OUTSIDE_PAY_PERIOD, "Payment Outside Pay Period"),
     ]
     SEVERITY_CHOICES = [("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")]
     STATUS_CHOICES = [

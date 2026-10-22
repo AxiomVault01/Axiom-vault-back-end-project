@@ -25,6 +25,9 @@ class DataUpload(models.Model):
     # The original file, kept private on Cloudinary as evidence. Empty for uploads made before 7d.
     source_public_id = models.CharField(max_length=255, blank=True, default="")
     file_size = models.PositiveIntegerField(default=0, help_text="Size of the original file in bytes.")
+    # Payroll only: the pay period the uploader set (decided by the client 2026-10-22).
+    period_start = models.DateField(null=True, blank=True)
+    period_end = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -51,7 +54,8 @@ class Payroll(models.Model):
     net_salary = models.DecimalField(max_digits=12, decimal_places=2)
 
     account_number = models.CharField(max_length=20)
-    pay_period = models.CharField(max_length=20)
+    # The upload's pay period as text, e.g. "2026-10-02 to 2026-10-07"; groups rows for the bank account rule.
+    pay_period = models.CharField(max_length=30)
     payment_date = models.DateField()
 
     # ⚙️ EXTENDED

@@ -250,7 +250,7 @@ def test_payroll_upload_reports_new_alerts(uploader):
         "E2,Bola,Ops,100,90,0123456789,2026-09,2026-09-28,Clerk,APR-01",
     ])
 
-    body = client_for(uploader).post(PAYROLL_URL, {"file": file}, format="multipart").json()
+    body = client_for(uploader).post(PAYROLL_URL, {"pay_period_start": "2026-01-01", "pay_period_end": "2026-12-31", "file": file}, format="multipart").json()
 
     assert body["detection"] == {"status": "completed", "alerts_created": 1, "alerts": ["ALT-0001"]}
     assert Alert.objects.get().rule == Alert.DUPLICATE_BANK_ACCOUNT
@@ -267,7 +267,7 @@ def test_payments_upload_reports_new_alerts(uploader):
 def test_clean_upload_reports_zero_alerts(uploader):
     file = csv("p.csv", PAYROLL_HEADER, ["E1,Ada,Ops,100,90,0123456789,2026-09,2026-09-28,Clerk,APR-01"])
 
-    body = client_for(uploader).post(PAYROLL_URL, {"file": file}, format="multipart").json()
+    body = client_for(uploader).post(PAYROLL_URL, {"pay_period_start": "2026-01-01", "pay_period_end": "2026-12-31", "file": file}, format="multipart").json()
 
     assert body["detection"] == {"status": "completed", "alerts_created": 0, "alerts": []}
 
@@ -649,3 +649,78 @@ def test_dashboard_needs_a_token_and_a_changed_password(org, member, path):
     member.refresh_from_db()
 
     assert client_for(member).get(DASH + path).status_code == 403
+
+
+# ---- payment outside the pay period (client rule, 2026-10-22) ----
+
+from fraud.services.detection import payments_outside_pay_period
+
+
+def period_upload(organisation, start, end):
+    return DataUpload.objects.create(
+        organisation=organisation, kind=DataUpload.PAYROLL, file_name="p.csv", row_count=0, period_start=start, period_end=end
+    )
+
+
+def paid(upload, employee_id, day, name=None, account=None):
+    return Payroll.objects.create(
+        organisation=upload.organisation, upload=upload, employee_id=employee_id, employee_name=name or f"Employee {employee_id}",
+        department="Operations", net_salary=Decimal("230000"), account_number=account or f"01{employee_id[-4:]:0>8}",
+        pay_period=f"{upload.period_start} to {upload.period_end}", payment_date=day, approver_id="APR-1",
+    )
+
+
+def test_payments_inside_the_period_are_not_flagged(org):
+    upload = period_upload(org, date(2026, 10, 2), date(2026, 10, 7))
+    paid(upload, "E001", date(2026, 10, 2))
+    paid(upload, "E002", date(2026, 10, 7))
+
+    assert payments_outside_pay_period(org, upload) == []
+
+
+def test_late_and_early_payments_are_flagged_by_severity(org):
+    upload = period_upload(org, date(2026, 10, 2), date(2026, 10, 7))
+    paid(upload, "E001", date(2026, 10, 5))                  # inside
+    paid(upload, "E002", date(2026, 10, 10), name="Bola")    # 3 days late -> medium
+    paid(upload, "E003", date(2026, 10, 20), name="Chi")     # 13 days late -> high
+    paid(upload, "E004", date(2026, 10, 1), name="Dayo")     # 1 day early -> high
+
+    findings = {f["entity_ref"]: f for f in payments_outside_pay_period(org, upload)}
+
+    assert set(findings) == {"E002", "E003", "E004"}
+    assert (findings["E002"]["severity"], findings["E002"]["risk_score"]) == ("medium", 55)
+    assert findings["E003"]["severity"] == "high" and findings["E004"]["severity"] == "high"
+    medium = findings["E002"]
+    assert medium["rule"] == Alert.PAYMENT_OUTSIDE_PAY_PERIOD and medium["risk_type"] == "Payment Outside Pay Period"
+    assert medium["title"] == "Bola paid outside the 2026-10-02 to 2026-10-07 pay period"
+    assert medium["flagged_records"][0]["outside_by"] == "3 days after"
+    assert findings["E004"]["flagged_records"][0]["outside_by"] == "1 day before"
+    assert medium["fingerprint"] == "payment_outside_pay_period:2026-10-02 to 2026-10-07:E002"
+
+
+def test_one_alert_per_employee_lists_every_outside_payment(org):
+    upload = period_upload(org, date(2026, 10, 2), date(2026, 10, 7))
+    paid(upload, "E009", date(2026, 10, 9), account="0100000091")
+    paid(upload, "E009", date(2026, 10, 12), account="0100000092")
+
+    [finding] = payments_outside_pay_period(org, upload)
+
+    assert [r["payment_date"] for r in finding["flagged_records"]] == ["2026-10-09", "2026-10-12"]
+
+
+def test_uploads_without_a_period_are_skipped(org):
+    upload = make_upload(org, DataUpload.PAYROLL)
+
+    assert payments_outside_pay_period(org, upload) == []
+
+
+def test_the_upload_raises_the_alert_end_to_end(uploader):
+    file = csv("p.csv", PAYROLL_HEADER, ["E1,Ada,Ops,100,90,0123456789,2026-09,2026-10-15,Clerk,APR-01"])
+
+    body = client_for(uploader).post(
+        PAYROLL_URL, {"pay_period_start": "2026-10-02", "pay_period_end": "2026-10-07", "file": file}, format="multipart"
+    ).json()
+
+    assert body["detection"]["alerts_created"] == 1
+    alert = Alert.objects.get(rule=Alert.PAYMENT_OUTSIDE_PAY_PERIOD)
+    assert alert.severity == "high" and alert.entity_ref == "E1"

@@ -20,11 +20,13 @@ from config.file_storage import StorageUnavailable, delete as real_delete, store
 
 User = get_user_model()
 UPLOAD_URL = "/api/v1/ingestion/upload-payroll/"
+# A whole year, so no test payment falls outside it unless a test means it to.
+PERIOD = {"pay_period_start": "2026-01-01", "pay_period_end": "2026-12-31"}
 HEADERS = [
     "employee_id", "employee_name", "department", "salary_basic", "net_salary",
-    "account_number", "pay_period", "payment_date", "role", "approver_id",
+    "account_number", "payment_date", "role", "approver_id",
 ]
-GOOD_ROW = ["EMP001", "Ada Obi", "Operations", "250,000.00", "230000", "0123456789", "2026-09", "28/09/2026", "Payroll Analyst", "APR-01"]
+GOOD_ROW = ["EMP001", "Ada Obi", "Operations", "250,000.00", "230000", "0123456789", "28/09/2026", "Payroll Analyst", "APR-01"]
 
 
 def csv_file(rows, headers=HEADERS, name="payroll.csv", encoding="utf-8"):
@@ -67,12 +69,12 @@ def test_csv_with_a_bom_or_windows_encoding_is_read():
 
 
 def test_xlsx_numbers_and_dates_come_back_usable():
-    headers, rows = FileParser.parse(xlsx_file([["EMP001", "Ada", "Ops", 250000.0, 230000.5, "0123456789", "2026-09", datetime(2026, 9, 28), "Analyst", "APR-01"]]))
+    headers, rows = FileParser.parse(xlsx_file([["EMP001", "Ada", "Ops", 250000.0, 230000.5, "0123456789", datetime(2026, 9, 28), "Analyst", "APR-01"]]))
 
     assert headers == HEADERS
     assert rows[0][3] == "250000" and rows[0][4] == "230000.5"
     assert rows[0][5] == "0123456789"
-    assert rows[0][7] == datetime(2026, 9, 28)
+    assert rows[0][6] == datetime(2026, 9, 28)
 
 
 @pytest.mark.parametrize(
@@ -98,19 +100,19 @@ def test_empty_or_broken_files_are_refused():
 def test_aliases_and_letter_case_map_to_standard_fields():
     standardiser = Standardiser(
         PAYROLL_SCHEMA,
-        ["Staff ID", "Full Name", "DEPT", "Basic Salary", "Net-Pay", "Account No", "Period", "Pay Date", "Remarks", "Branch", "Position", "Approver ID"]
+        ["Staff ID", "Full Name", "DEPT", "Basic Salary", "Net-Pay", "Account No", "Pay Date", "Remarks", "Branch", "Position", "Approver ID"]
     )
 
     assert standardiser.missing_columns == []
     assert standardiser.columns["net_salary"] == 4
-    assert standardiser.columns["location"] == 9
+    assert standardiser.columns["location"] == 8
     assert standardiser.ignored_columns == ["Remarks"]
 
 
 def test_missing_required_columns_are_listed():
     standardiser = Standardiser(PAYROLL_SCHEMA, ["employee_id", "employee_name"])
 
-    assert standardiser.missing_columns == ["department", "role", "account_number", "net_salary", "payment_date", "pay_period", "approver_id"]
+    assert standardiser.missing_columns == ["department", "role", "account_number", "net_salary", "payment_date", "approver_id"]
 
 
 def test_a_good_row_becomes_typed_values():
@@ -134,9 +136,9 @@ def test_blank_rows_are_skipped():
         (3, "₦250,000", Decimal("250000")),
         (3, "NGN 1,000.50", Decimal("1000.50")),
         (5, "0123-456 789", "0123456789"),
-        (7, "2026-09-28", date(2026, 9, 28)),
-        (7, "28-09-2026", date(2026, 9, 28)),
-        (7, "03/04/2026", date(2026, 4, 3)),
+        (6, "2026-09-28", date(2026, 9, 28)),
+        (6, "28-09-2026", date(2026, 9, 28)),
+        (6, "03/04/2026", date(2026, 4, 3)),
     ],
 )
 def test_accepted_value_formats(index, value, expected):
@@ -159,9 +161,9 @@ def test_accepted_value_formats(index, value, expected):
         (4, "99999999999", "too large"),
         (5, "01234ABC", "digits only"),
         (5, "1" * 21, "digits only"),
-        (6, "x" * 21, "at most 20 characters"),
-        (7, "Sept 28", "Use a date like"),
-        (7, "2026-02-30", "Use a date like"),
+        (7, "x" * 101, "at most 100 characters"),
+        (6, "Sept 28", "Use a date like"),
+        (6, "2026-02-30", "Use a date like"),
     ],
 )
 def test_invalid_values_are_reported_per_field(index, value, message):
@@ -186,8 +188,8 @@ def test_optional_fields_default_and_check():
 
 
 def test_duplicates_report_the_first_row():
-    rows = [(2, {"employee_id": "E1", "account_number": "1", "pay_period": "2026-09"})] * 2 + [
-        (4, {"employee_id": "E1", "account_number": "1", "pay_period": "2026-10"})
+    rows = [(2, {"employee_id": "E1", "account_number": "1"})] * 2 + [
+        (4, {"employee_id": "E1", "account_number": "2"})
     ]
     rows[1] = (3, rows[1][1])
 
@@ -218,7 +220,7 @@ def client_for(user):
 def test_csv_upload_saves_every_row_for_the_organisation(uploader):
     second = list(GOOD_ROW)
     second[0] = "EMP002"
-    response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW, second])}, format="multipart")
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW, second])}, format="multipart")
 
     assert response.status_code == 201
     body = response.json()
@@ -235,10 +237,10 @@ def test_csv_upload_saves_every_row_for_the_organisation(uploader):
 
 
 def test_xlsx_upload_with_aliases_and_extra_columns(uploader):
-    headers = ["Staff ID", "Name", "Dept", "Basic", "Net Pay", "Account No", "Period", "Pay Date", "Remarks", "Job Title", "Approved By"]
-    row = ["EMP9", "Bola", "Finance", 300000, 280000, "0011223344", "2026-09", datetime(2026, 9, 30), "ok", "Accountant", "APR-02"]
+    headers = ["Staff ID", "Name", "Dept", "Basic", "Net Pay", "Account No", "Pay Date", "Remarks", "Job Title", "Approved By"]
+    row = ["EMP9", "Bola", "Finance", 300000, 280000, "0011223344", datetime(2026, 9, 30), "ok", "Accountant", "APR-02"]
 
-    response = client_for(uploader).post(UPLOAD_URL, {"file": xlsx_file([row], headers)}, format="multipart")
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": xlsx_file([row], headers)}, format="multipart")
 
     assert response.status_code == 201
     assert response.json()["ignored_columns"] == ["Remarks"]
@@ -250,7 +252,7 @@ def test_one_bad_row_saves_nothing(uploader):
     bad = list(GOOD_ROW)
     bad[0], bad[4] = "EMP002", "-10"
 
-    response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW, bad, GOOD_ROW])}, format="multipart")
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW, bad, GOOD_ROW])}, format="multipart")
 
     assert response.status_code == 400
     body = response.json()
@@ -263,9 +265,9 @@ def test_one_bad_row_saves_nothing(uploader):
 
 
 def test_only_the_first_hundred_errors_are_returned(uploader):
-    rows = [[f"E{i}", "A", "B", "x", "1", "1", "P", "2026-01-01", "Clerk", "APR-01"] for i in range(150)]
+    rows = [[f"E{i}", "A", "B", "x", "1", "1", "2026-01-01", "Clerk", "APR-01"] for i in range(150)]
 
-    body = client_for(uploader).post(UPLOAD_URL, {"file": csv_file(rows)}, format="multipart").json()
+    body = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file(rows)}, format="multipart").json()
 
     assert body["error_count"] == 150 and len(body["validation_errors"]) == 100
 
@@ -279,7 +281,7 @@ def test_only_the_first_hundred_errors_are_returned(uploader):
     ],
 )
 def test_file_level_problems_get_400(uploader, file, error_start):
-    response = client_for(uploader).post(UPLOAD_URL, {"file": file()}, format="multipart")
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": file()}, format="multipart")
 
     assert response.status_code == 400
     assert response.json()["error"].startswith(error_start)
@@ -288,10 +290,10 @@ def test_file_level_problems_get_400(uploader, file, error_start):
 
 def test_missing_columns_are_named(uploader):
     body = client_for(uploader).post(
-        UPLOAD_URL, {"file": csv_file([GOOD_ROW[:2]], headers=["employee_id", "employee_name"])}, format="multipart"
+        UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW[:2]], headers=["employee_id", "employee_name"])}, format="multipart"
     ).json()
 
-    assert body["missing_columns"] == ["department", "role", "account_number", "net_salary", "payment_date", "pay_period", "approver_id"]
+    assert body["missing_columns"] == ["department", "role", "account_number", "net_salary", "payment_date", "approver_id"]
 
 
 def test_no_file_gets_400(uploader):
@@ -304,7 +306,7 @@ def test_no_file_gets_400(uploader):
 def test_too_many_rows_gets_400(uploader):
     with patch("ingestion.services.ingestion_service.MAX_ROWS", 2):
         rows = [[f"E{i}"] + GOOD_ROW[1:] for i in range(3)]
-        response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file(rows)}, format="multipart")
+        response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file(rows)}, format="multipart")
 
     assert response.status_code == 400
     assert "more than 2 rows" in response.json()["error"]
@@ -312,14 +314,14 @@ def test_too_many_rows_gets_400(uploader):
 
 def test_too_large_file_gets_413(uploader):
     with patch("ingestion.viewsets.MAX_FILE_BYTES", 10):
-        response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+        response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert response.status_code == 413
     assert response.json() == {"error": "The file is larger than 10 MB."}
 
 
 def test_upload_needs_a_token(db):
-    response = APIClient().post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+    response = APIClient().post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert response.status_code == 401
 
@@ -327,7 +329,7 @@ def test_upload_needs_a_token(db):
 def test_account_without_an_organisation_cannot_upload(db):
     staff = User.objects.create_user(username="ops", email="ops@example.com", password="Str0ng-Passw0rd!", is_staff=True)
 
-    response = client_for(staff).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+    response = client_for(staff).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert response.status_code == 403
     assert response.json() == {"error": "Only organisation accounts can upload files."}
@@ -339,10 +341,10 @@ def test_team_member_may_upload_but_not_on_a_temporary_password(uploader):
         account_type="team_member", is_verified=True, must_change_password=True,
     )
 
-    blocked = client_for(member).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+    blocked = client_for(member).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
     User.objects.filter(pk=member.pk).update(must_change_password=False)
     member.refresh_from_db()
-    allowed = client_for(member).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+    allowed = client_for(member).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert blocked.status_code == 403 and blocked.json()["code"] == "password_change_required"
     assert allowed.status_code == 201
@@ -351,8 +353,8 @@ def test_team_member_may_upload_but_not_on_a_temporary_password(uploader):
 def test_the_same_employee_in_two_uploads_is_allowed(uploader):
     client = client_for(uploader)
 
-    first = client.post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
-    second = client.post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+    first = client.post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
+    second = client.post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert first.status_code == second.status_code == 201
     assert Payroll.objects.count() == 2
@@ -401,7 +403,7 @@ def test_upload_keeps_the_exact_original_file(uploader, fake_storage):
     raw = sent.read()
     sent.seek(0)
 
-    body = client_for(uploader).post(UPLOAD_URL, {"file": sent}, format="multipart").json()
+    body = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": sent}, format="multipart").json()
 
     upload = DataUpload.objects.get()
     expected_id = f"axiomvault/{uploader.organisation_id}/payroll/{upload.id}.csv"
@@ -415,7 +417,7 @@ def test_rejected_files_are_never_stored(uploader, fake_storage):
     bad = list(GOOD_ROW)
     bad[4] = "-1"
 
-    client_for(uploader).post(UPLOAD_URL, {"file": csv_file([bad])}, format="multipart")
+    client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([bad])}, format="multipart")
 
     assert fake_storage.files == {}
 
@@ -428,7 +430,7 @@ def test_storage_failure_gives_503_and_saves_nothing(uploader, monkeypatch):
 
     monkeypatch.setattr(file_storage, "store_private", broken)
 
-    response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart")
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart")
 
     assert response.status_code == 503
     assert response.json() == {
@@ -566,7 +568,7 @@ def test_vendor_and_payment_uploads_need_an_organisation_account(db):
 
 
 def test_payroll_upload_reports_its_kind(uploader):
-    body = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([GOOD_ROW])}, format="multipart").json()
+    body = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW])}, format="multipart").json()
 
     assert body["upload"]["kind"] == "payroll"
 
@@ -575,18 +577,18 @@ def test_payroll_upload_reports_its_kind(uploader):
 
 TEMPLATE_HEADERS = [
     "Employee ID", "Full Name", "Department", "Position", "Bank Account Number", "Salary Amount", "Payment Date",
-    "Attendance Days", "Employment Status", "Exit Date", "Approver ID", "Pay Period",
+    "Attendance Days", "Employment Status", "Exit Date", "Approver ID",
 ]
 
 
 def template_row(employee="EMP001", status="Active", exit_date="", attendance="22", approver="APR-01"):
-    return [employee, "Ada Obi", "Operations", "Payroll Analyst", "0123456789", "230,000", "28/10/2026", attendance, status, exit_date, approver, "2026-10"]
+    return [employee, "Ada Obi", "Operations", "Payroll Analyst", "0123456789", "230,000", "28/10/2026", attendance, status, exit_date, approver]
 
 
 def test_the_frontend_template_uploads(uploader):
     rows = [template_row(), template_row("EMP002", "Exited", "30/09/2026")]
 
-    response = client_for(uploader).post(UPLOAD_URL, {"file": xlsx_file(rows, TEMPLATE_HEADERS)}, format="multipart")
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": xlsx_file(rows, TEMPLATE_HEADERS)}, format="multipart")
 
     assert response.status_code == 201, response.json()
     assert response.json()["ignored_columns"] == []
@@ -597,36 +599,72 @@ def test_the_frontend_template_uploads(uploader):
 
 
 def test_template_cells_may_be_blank_except_exit_date_for_leavers(uploader):
-    ok = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([template_row(status="", attendance="")], TEMPLATE_HEADERS)}, format="multipart")
+    ok = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([template_row(status="", attendance="")], TEMPLATE_HEADERS)}, format="multipart")
     assert ok.status_code == 201
 
     for status in ("Exited", "terminated", "RESIGNED"):
-        response = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([template_row("EMP009", status)], TEMPLATE_HEADERS)}, format="multipart")
+        response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([template_row("EMP009", status)], TEMPLATE_HEADERS)}, format="multipart")
         body = response.json()
         assert response.status_code == 400 and body["validation_errors"] == [
             {"row": 2, "field": "exit_date", "error": "Exit Date is required when Employment Status shows the employee has left."}
         ]
 
 
-def test_template_still_needs_position_and_pay_period(uploader):
-    headers = [h for h in TEMPLATE_HEADERS if h not in ("Position", "Pay Period")]
+def test_template_still_needs_position(uploader):
+    headers = [h for h in TEMPLATE_HEADERS if h != "Position"]
     row = [cell for header, cell in zip(TEMPLATE_HEADERS, template_row()) if header in headers]
 
-    body = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([row], headers)}, format="multipart").json()
+    body = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([row], headers)}, format="multipart").json()
 
-    assert body["missing_columns"] == ["role", "pay_period"]
+    assert body["missing_columns"] == ["role"]
 
 
 def test_approver_id_is_required(uploader):
-    blank = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([template_row(approver="")], TEMPLATE_HEADERS)}, format="multipart").json()
+    blank = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([template_row(approver="")], TEMPLATE_HEADERS)}, format="multipart").json()
     assert blank["validation_errors"] == [{"row": 2, "field": "approver_id", "error": "This value is required."}]
 
     headers = [h for h in TEMPLATE_HEADERS if h != "Approver ID"]
     row = [cell for header, cell in zip(TEMPLATE_HEADERS, template_row()) if header != "Approver ID"]
-    assert client_for(uploader).post(UPLOAD_URL, {"file": csv_file([row], headers)}, format="multipart").json()["missing_columns"] == ["approver_id"]
+    assert client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([row], headers)}, format="multipart").json()["missing_columns"] == ["approver_id"]
 
 
 def test_a_bad_exit_date_is_reported(uploader):
-    body = client_for(uploader).post(UPLOAD_URL, {"file": csv_file([template_row(status="Exited", exit_date="soon")], TEMPLATE_HEADERS)}, format="multipart").json()
+    body = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([template_row(status="Exited", exit_date="soon")], TEMPLATE_HEADERS)}, format="multipart").json()
 
     assert body["validation_errors"][0]["field"] == "exit_date" and "Use a date like" in body["validation_errors"][0]["error"]
+
+
+# ---- pay period set by the uploader (client decision, 2026-10-22) ----
+
+
+def test_the_pay_period_is_kept_on_the_upload_and_rows(uploader):
+    response = client_for(uploader).post(
+        UPLOAD_URL, {"pay_period_start": "02/09/2026", "pay_period_end": "2026-09-30", "file": csv_file([GOOD_ROW])}, format="multipart"
+    )
+
+    assert response.status_code == 201
+    body = response.json()["upload"]
+    assert (body["pay_period_start"], body["pay_period_end"]) == ("2026-09-02", "2026-09-30")
+    assert Payroll.objects.get().pay_period == "2026-09-02 to 2026-09-30"
+
+
+@pytest.mark.parametrize(
+    "period, errors",
+    [
+        ({}, {"pay_period_start": ["This field is required."], "pay_period_end": ["This field is required."]}),
+        ({"pay_period_start": "2026-09-07", "pay_period_end": "2026-09-02"}, {"pay_period_end": ["The pay period must end on or after its start date."]}),
+        ({"pay_period_start": "Sept 2", "pay_period_end": "2026-09-07"}, "pay_period_start"),
+    ],
+)
+def test_the_pay_period_is_required_and_checked(uploader, period, errors):
+    response = client_for(uploader).post(UPLOAD_URL, {**period, "file": csv_file([GOOD_ROW])}, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json() == errors if isinstance(errors, dict) else errors in response.json()
+    assert not Payroll.objects.exists()
+
+
+def test_vendor_and_payment_uploads_need_no_pay_period(uploader):
+    response = client_for(uploader).post(VENDORS_URL, {"file": csv_file([VENDOR_ROW], VENDOR_HEADERS)}, format="multipart")
+
+    assert response.status_code == 201 and response.json()["upload"]["pay_period_start"] is None
