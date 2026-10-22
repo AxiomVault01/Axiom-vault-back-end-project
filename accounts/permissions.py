@@ -26,3 +26,16 @@ class PasswordChangeNotRequired(BasePermission):
     def has_permission(self, request, view):
         user = request.user
         return not (user and user.is_authenticated and user.must_change_password)
+
+
+NOT_ADMIN_MESSAGE = "This account can't sign in to the Admin Control Panel."
+
+
+class IsAxiomVaultStaff(BasePermission):
+    """Admin Control Panel endpoints: AxiomVault staff (`is_staff`) only; the owner is staff too."""
+
+    message = {"error": NOT_ADMIN_MESSAGE, "code": "not_admin"}
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and user.is_staff)

@@ -300,3 +300,8 @@ class SettingsSerializer(serializers.ModelSerializer):
         except (ZoneInfoNotFoundError, ValueError):
             raise serializers.ValidationError(TIME_ZONE_MESSAGE)
         return value
+
+
+class AdminLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="The staff account's email address. Letter case does not matter.")
+    password = serializers.CharField(write_only=True, help_text="The staff account's password.")
