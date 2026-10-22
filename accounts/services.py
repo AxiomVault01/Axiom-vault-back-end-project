@@ -634,3 +634,60 @@ class TeamService:
             if not active:
                 blacklist_all_refresh_tokens(member)
         return member
+
+
+DEACTIVATED_RESET_MESSAGE = "This account is deactivated. Reactivate it before sending a password reset."
+SUPER_ADMIN_EXISTS_MESSAGE = "This organisation already has a super admin."
+
+
+class AdminAccountService:
+    """AxiomVault staff managing accounts from the Admin Control Panel (feature 21)."""
+
+    @staticmethod
+    def create(data: dict, **fixed) -> User:
+        """Creates a verified account with a temporary password the person must change on first login.
+
+        `fixed` holds what the endpoint decides (organisation, account type, staff flag), never the request.
+        """
+        full_name = data["full_name"].strip()
+        try:
+            validate_password(data["password"], user=User(email=data["email"], full_name=full_name))
+        except DjangoValidationError as exc:
+            raise ValidationError({"password": list(exc.messages)})
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    username=uuid.uuid4().hex,
+                    email=data["email"],
+                    password=data["password"],
+                    full_name=full_name,
+                    phone_number=data.get("phone_number", ""),
+                    role=data.get("role", "").strip(),
+                    department="",
+                    is_verified=True,
+                    must_change_password=True,
+                    **fixed,
+                )
+        except IntegrityError:
+            # Same email added twice at once, or a second super admin racing the first.
+            if fixed.get("account_type") == User.SUPER_ADMIN and User.objects.filter(
+                organisation=fixed.get("organisation"), account_type=User.SUPER_ADMIN
+            ).exists():
+                raise ValidationError({"account_type": [SUPER_ADMIN_EXISTS_MESSAGE]})
+            raise ValidationError({"email": [EMAIL_TAKEN_MESSAGE]})
+
+    @staticmethod
+    def send_password_reset(user: User) -> None:
+        """Emails the same reset code the Forgot Password screen sends; the person finishes in the app."""
+        if not user.is_active:
+            raise ValidationError({"error": DEACTIVATED_RESET_MESSAGE})
+        latest = OTP.objects.filter(email__iexact=user.email, purpose="password_reset").order_by("-created_at").first()
+        if latest:
+            elapsed = (timezone.now() - latest.created_at).total_seconds()
+            if elapsed < VERIFICATION_CODE_COOLDOWN_SECONDS:
+                raise CodeRequestTooSoon(retry_after=math.ceil(VERIFICATION_CODE_COOLDOWN_SECONDS - elapsed))
+        try:
+            with transaction.atomic():
+                OTPService.generate(user.email, purpose="password_reset", lifetime=RESET_CODE_LIFETIME)
+        except OperationalError:
+            raise CodeDeliveryUnavailable()

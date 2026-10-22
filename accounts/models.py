@@ -186,6 +186,11 @@ class AuditLog(models.Model):
     ORGANISATION_UPDATED = "organisation_updated"
     ORGANISATION_SUSPENDED = "organisation_suspended"
     ORGANISATION_REACTIVATED = "organisation_reactivated"
+    USER_CREATED = "user_created"
+    USER_UPDATED = "user_updated"
+    USER_DEACTIVATED = "user_deactivated"
+    USER_REACTIVATED = "user_reactivated"
+    PASSWORD_RESET_SENT = "password_reset_sent"
     PROFILE_UPDATED = "profile_updated"
     SETTINGS_UPDATED = "settings_updated"
     PROFILE_PICTURE_UPDATED = "profile_picture_updated"
@@ -219,6 +224,11 @@ class AuditLog(models.Model):
         (ORGANISATION_UPDATED, "Edited an organisation"),
         (ORGANISATION_SUSPENDED, "Suspended an organisation"),
         (ORGANISATION_REACTIVATED, "Reactivated an organisation"),
+        (USER_CREATED, "Created an account (admin panel)"),
+        (USER_UPDATED, "Edited an account (admin panel)"),
+        (USER_DEACTIVATED, "Deactivated an account (admin panel)"),
+        (USER_REACTIVATED, "Reactivated an account (admin panel)"),
+        (PASSWORD_RESET_SENT, "Sent a password reset code (admin panel)"),
         (PROFILE_UPDATED, "Edited their profile"),
         (SETTINGS_UPDATED, "Changed their settings"),
         (PROFILE_PICTURE_UPDATED, "Changed their profile picture"),

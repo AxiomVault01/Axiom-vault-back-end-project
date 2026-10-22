@@ -289,6 +289,7 @@ SPECTACULAR_SETTINGS = {
         "SeverityEnum": "fraud.models.Alert.SEVERITY_CHOICES",
         "AccountTypeEnum": "accounts.models.User.ACCOUNT_TYPE_CHOICES",
         "OrganisationStatusEnum": "accounts.models.Organisation.STATUS_CHOICES",
+        "CooperativeAccountTypeEnum": [("super_admin", "super_admin"), ("team_member", "team_member")],
     },
 }
 
