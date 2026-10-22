@@ -15,9 +15,9 @@ from rest_framework.response import Response
 from config import file_storage
 from config.file_storage import StorageUnavailable
 
-from .models import AuditLog
+from .models import AuditLog, UserSettings
 from .permissions import PASSWORD_CHANGE_REQUIRED_MESSAGE
-from .serializers import PHONE_NUMBER_MESSAGE, ProfileSerializer, ProfileUpdateSerializer
+from .serializers import PHONE_NUMBER_MESSAGE, TIME_ZONE_MESSAGE, ProfileSerializer, ProfileUpdateSerializer, SettingsSerializer
 
 MAX_PICTURE_BYTES = 2 * 1024 * 1024
 PICTURE_FORMATS = {"JPEG", "PNG", "WEBP"}
@@ -83,6 +83,18 @@ PROFILE_NOTE = (
 )
 
 
+SETTINGS_EXAMPLE = {
+    "critical_risk_alerts": True,
+    "high_risk_alerts": True,
+    "daily_summary_reports": False,
+    "system_updates": True,
+    "language": "en-US",
+    "time_zone": "Africa/Lagos",
+    "date_format": "DD/MM/YYYY",
+    "updated_at": "2026-10-21T09:00:00Z",
+}
+
+
 class MeViewSet(viewsets.ViewSet):
     """Endpoints about the caller's own account."""
 
@@ -140,6 +152,65 @@ class MeViewSet(viewsets.ViewSet):
                 user.save(update_fields=changed)
                 AuditLog.record(AuditLog.PROFILE_UPDATED, actor=user, target=user, request=request, details={"fields": changed})
         return Response(ProfileSerializer(user).data)
+
+    @extend_schema(
+        tags=["My account"],
+        summary="My settings",
+        description=(
+            "**Settings screen: Notification Preferences and System Preferences.** The logged-in user's own "
+            "preferences. The first read creates them with the defaults: Critical Risk Alerts on, High Risk Alerts on, "
+            "Daily Summary Reports off, System Updates on, language `en-US`, time zone `Africa/Lagos`, date format "
+            "`DD/MM/YYYY`.\n\n"
+            "**What they do today:** the frontend uses language, time zone, and date format to display data (the API "
+            "always sends times as ISO 8601 UTC). The notification switches are saved for the coming notification "
+            "feature; no notifications are sent yet.\n\n" + AUTH_NOTE
+        ),
+        methods=["GET"],
+        responses={200: OpenApiResponse(response=SettingsSerializer, examples=[OpenApiExample("Defaults", value=SETTINGS_EXAMPLE)]), 401: UNAUTHORIZED, 403: FORBIDDEN},
+    )
+    @extend_schema(
+        tags=["My account"],
+        summary="Save my settings",
+        description=(
+            "**Save Preferences** (and each notification switch). Changes only the fields sent, all optional:\n"
+            "- `critical_risk_alerts`, `high_risk_alerts`, `daily_summary_reports`, `system_updates`: `true` or `false`\n"
+            "- `language`: `en-US`, `en-GB`, or `es`\n"
+            "- `time_zone`: an IANA time zone name such as `Africa/Lagos` or `Europe/London`\n"
+            "- `date_format`: `DD/MM/YYYY`, `MM/DD/YYYY`, or `YYYY-MM-DD`\n\n"
+            "Other keys are ignored. 200 returns all settings. If any value is invalid, nothing is saved (400). "
+            "Changes are recorded in the audit log.\n\n" + AUTH_NOTE
+        ),
+        methods=["PATCH"],
+        request=SettingsSerializer,
+        examples=[OpenApiExample("Turn on daily reports, UK English", value={"daily_summary_reports": True, "language": "en-GB"}, request_only=True)],
+        responses={
+            200: OpenApiResponse(response=SettingsSerializer, examples=[OpenApiExample("Saved", value={**SETTINGS_EXAMPLE, "daily_summary_reports": True, "language": "en-GB"})]),
+            400: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                examples=[
+                    OpenApiExample("Unknown language", value={"language": ['"fr" is not a valid choice.']}),
+                    OpenApiExample("Bad time zone", value={"time_zone": [TIME_ZONE_MESSAGE]}),
+                    OpenApiExample("Not a boolean", value={"system_updates": ["Must be a valid boolean."]}),
+                ],
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+        },
+    )
+    @action(detail=False, methods=["get", "patch"], url_path="settings")
+    def user_settings(self, request):
+        user = request.user
+        settings, _ = UserSettings.objects.get_or_create(user=user)
+        if request.method == "GET":
+            return Response(SettingsSerializer(settings).data)
+        serializer = SettingsSerializer(settings, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        changed = [name for name, value in serializer.validated_data.items() if getattr(settings, name) != value]
+        if changed:
+            with transaction.atomic():
+                serializer.save()
+                AuditLog.record(AuditLog.SETTINGS_UPDATED, actor=user, target=user, request=request, details={"fields": changed})
+        return Response(SettingsSerializer(settings).data)
 
     @extend_schema(
         tags=["My account"],
