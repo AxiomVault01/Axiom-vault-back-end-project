@@ -143,7 +143,15 @@ class EmailNotVerified(APIException):
         self.detail = {"error": EMAIL_NOT_VERIFIED_MESSAGE}
 
 
-from .permissions import NOT_ADMIN_MESSAGE  # noqa: E402 (one copy of the message)
+from .permissions import NOT_ADMIN_MESSAGE, ORGANISATION_SUSPENDED_MESSAGE  # noqa: E402 (one copy of each message)
+
+
+class OrganisationSuspended(APIException):
+    status_code = status.HTTP_403_FORBIDDEN
+
+    def __init__(self):
+        super().__init__()
+        self.detail = {"error": ORGANISATION_SUSPENDED_MESSAGE, "code": "organisation_suspended"}
 
 
 class NotAdminAccount(APIException):
@@ -414,6 +422,8 @@ class AuthService:
         # One message for every mismatch, so it never names the account's real type.
         if role != user.account_type:
             raise WrongSignInRole()
+        if user.organisation and user.organisation.is_suspended:
+            raise OrganisationSuspended()
 
         refresh = RefreshToken.for_user(user)
         update_last_login(None, user)
@@ -473,7 +483,7 @@ class AuthService:
         user_id = token.payload.get(jwt_settings.USER_ID_CLAIM)
         # filter().first() returns None for a deleted user instead of raising (simplejwt's own view 500s).
         user = User.objects.filter(**{jwt_settings.USER_ID_FIELD: user_id}).first() if user_id else None
-        if user is None or not user.is_active:
+        if user is None or not user.is_active or (user.organisation and user.organisation.is_suspended):
             raise InvalidRefreshToken()
 
         return {"access": str(token.access_token)}

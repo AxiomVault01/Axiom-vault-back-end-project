@@ -234,7 +234,8 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 # =====================
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # simplejwt's JWT check plus: users of a suspended organisation are refused (feature 20).
+        "accounts.authentication.SuspensionAwareJWTAuthentication",
     ),
     # Every endpoint needs a logged-in user who has replaced any temporary password, unless the
     # view says otherwise (the public auth endpoints, logout, and change password do).
@@ -287,6 +288,7 @@ SPECTACULAR_SETTINGS = {
         "CaseStatusEnum": "fraud.models.Case.STATUS_CHOICES",
         "SeverityEnum": "fraud.models.Alert.SEVERITY_CHOICES",
         "AccountTypeEnum": "accounts.models.User.ACCOUNT_TYPE_CHOICES",
+        "OrganisationStatusEnum": "accounts.models.Organisation.STATUS_CHOICES",
     },
 }
 
