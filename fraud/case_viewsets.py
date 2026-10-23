@@ -4,7 +4,7 @@ import uuid
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Count, Max, Q
-from django.http import Http404
+from django.http import Http404, HttpResponse
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiResponse, extend_schema
@@ -34,7 +34,9 @@ from .case_serializers import (
 )
 from .investigation_serializers import InvestigationSerializer
 from .models import Alert, AlertEvent, Case, CaseComment, CaseEvent, CaseEvidence
+from .report_serializers import ReportSerializer
 from .services.investigation import InvestigationService
+from .services.report import ReportService
 from .viewsets import (
     ALERT_EXAMPLE,
     FORBIDDEN,
@@ -52,6 +54,8 @@ CASE_REFERENCE_PATTERN = re.compile(r"CASE-(\d{4,})", re.IGNORECASE)
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 ESCALATE_INSTEAD_MESSAGE = "Use the escalate endpoint to escalate a case."
 CLOSED_CASE_MESSAGE = "A closed case cannot be escalated. Reopen it first."
+ARCHIVED_CASE_MESSAGE = "An archived case cannot be escalated. Restore it first."
+ARCHIVE_CLOSED_ONLY_MESSAGE = "Only a closed case can be archived. Close it first."
 UNKNOWN_FILE_MESSAGE = "No file with this ID in your organisation."
 DOCUMENT_TYPE_MESSAGE = "Supporting documents must be CSV, XLS, or XLSX files."
 DOCUMENT_EXTENSIONS = (".csv", ".xls", ".xlsx")
@@ -137,6 +141,47 @@ REFERENCE_PARAM = OpenApiParameter(
     "reference", OpenApiTypes.STR, OpenApiParameter.PATH, description="The case's reference, e.g. `CASE-0001` (any letter case)."
 )
 NOT_A_MEMBER = OpenApiExample("Not a member", value={"investigator_id": [REVIEWER_INVALID_MESSAGE]})
+REPORT_EXAMPLE = {
+    "case": DETAIL_EXAMPLE,
+    "alerts": [{
+        "reference": "ALT-0002", "title": ALERT_EXAMPLE["title"], "risk_type": "Duplicate Payment", "rule": "duplicate_payment",
+        "severity": "high", "status": "investigating", "risk_score": 90, "confidence": 90, "entity_type": "vendor",
+        "entity_name": "Acme Supplies", "entity_ref": "VND-8847", "department": "Procurement",
+        "explanation": "Invoice INV-2024-8847 from Acme Supplies was paid 2 times under different transactions "
+        "(TXN-90214, TXN-90455), 84,700.00 in total. 42,350.00 is more than the invoice should have cost and may need "
+        "to be recovered.",
+        "flagged_records": DETAIL_EXAMPLE["transactions"],
+        "detected_at": "2026-10-14T18:02:11Z",
+    }],
+    "analysis": INVESTIGATION_EXAMPLE["analysis"],
+    "related": INVESTIGATION_EXAMPLE["related"],
+    "evidence": [{
+        "file_name": "gtbank-statement-oct.pdf", "content_type": "application/pdf", "size": 248133, "source": "evidence",
+        "added_by": ACTOR, "added_at": "2026-10-15T10:01:00Z",
+    }],
+    "comments": [COMMENT_EXAMPLE],
+    "history": [
+        {"id": "0f9e6a1c-7b2d-4c3e-9a8f-1b2c3d4e5f60", "type": "created", "actor": ACTOR, "from_status": "", "to_status": "new", "detail": CASE_EXAMPLE["title"], "created_at": "2026-10-15T09:00:00Z"},
+    ],
+    "generated_at": "2026-10-22T18:00:00Z",
+    "generated_by": ACTOR,
+}
+REPORT_NOTE = (
+    "**What the report holds:** the case (as the Case detail returns it), every linked alert with its explanation "
+    "and flagged records, the transaction analysis and related entities (as the investigation endpoint returns "
+    "them), the evidence list (file name, type, size, source, who added it and when; no download links, because "
+    "a report outlives a 1-hour link), every comment and the full history oldest first, and who generated it when. "
+    "It works for every case status, archived included."
+)
+EXPORT_NOTE = (
+    "**Download:** the body is the file itself, with `Content-Disposition: attachment; filename=\"CASE-0001-"
+    "evidence-report.{ext}\"`. Fetch it with the Bearer token and save the blob (a plain link cannot send the "
+    "token). Send `Accept: */*` or leave `Accept` out (the fetch default); `Accept: {type}` is 406. Errors (401, "
+    "403, 404) are JSON like every other endpoint.\n\n"
+    "**Audit:** every download writes one `case_report_exported` row to the audit log with the case reference "
+    "and the format, so exports that leave the system can be traced. The file is built on each request and never "
+    "stored."
+)
 
 
 def _member(organisation, user_id):
@@ -179,7 +224,8 @@ class CaseViewSet(viewsets.GenericViewSet):
             "**Investigations screen.** The organisation's cases, newest first, with the columns of the table "
             "(reference, title, status, assigned investigator, priority, created, last updated, SLA).\n\n"
             "**Filters** (all optional, combined with AND):\n"
-            "- `status`: `new`, `investigating`, `under_review`, `escalated`, `closed`\n"
+            "- `status`: `new`, `investigating`, `under_review`, `escalated`, `closed`, or `archived`. Archived "
+            "cases are left out unless you ask for `status=archived` (the Archived Cases list)\n"
             "- `priority`: `critical`, `high`, `medium`, `low`\n"
             "- `investigator`: a user ID, or `none` for cases nobody investigates yet\n"
             "- `search`: matches the case reference (`CASE-0001`), the title, a linked alert's reference "
@@ -207,6 +253,8 @@ class CaseViewSet(viewsets.GenericViewSet):
         filters.is_valid(raise_exception=True)
         f = filters.validated_data
         cases = self.get_queryset()
+        if f.get("status") != "archived":
+            cases = cases.exclude(status="archived")
         for name in ("status", "priority"):
             if name in f:
                 cases = cases.filter(**{name: f[name]})
@@ -361,11 +409,15 @@ class CaseViewSet(viewsets.GenericViewSet):
         summary="Change a case's status",
         description=(
             "**Quick actions:** Start Investigation (`investigating`), send for review (`under_review`), Close Case "
-            "(`closed`), Re-Open Investigation (`investigating` from `closed`). Any change between `new`, "
-            "`investigating`, `under_review`, and `closed` is allowed. `escalated` is only set by "
+            "(`closed`), Re-Open Investigation (`investigating` from `closed`), Archive (`archived`). Any change between "
+            "`new`, `investigating`, `under_review`, and `closed` is allowed. `escalated` is only set by "
             "`POST .../escalate/`, because it needs a reason and a person (400 here). Sending the current status "
             "is 400.\n\n"
-            "Closing sets `closed_at` and stops the SLA (`sla_days_remaining: null`); reopening clears `closed_at`. "
+            "**Archiving:** only a `closed` case can move to `archived` (400 otherwise). Archived cases leave the "
+            "main Investigations list and appear in `GET /api/v1/fraud/cases/?status=archived`; their detail, "
+            "history, and report still open. Restore one by sending any other status (for example `closed`).\n\n"
+            "Closing sets `closed_at` and stops the SLA (`sla_days_remaining: null`); archiving and restoring to "
+            "`closed` keep the original `closed_at`; reopening clears it. "
             "An optional `note` (up to 2000 characters) is saved in the history. 200 returns the updated case. "
             "Every change is recorded in the case history and the audit log.\n\n" + AUTH_NOTE
         ),
@@ -382,6 +434,7 @@ class CaseViewSet(viewsets.GenericViewSet):
                 examples=[
                     OpenApiExample("Same status", value={"status": ["The case is already New."]}),
                     OpenApiExample("Escalate here", value={"status": [ESCALATE_INSTEAD_MESSAGE]}),
+                    OpenApiExample("Archive an open case", value={"status": [ARCHIVE_CLOSED_ONLY_MESSAGE]}),
                     OpenApiExample("Unknown status", value={"status": ['"open" is not a valid choice.']}),
                 ],
             ),
@@ -398,10 +451,13 @@ class CaseViewSet(viewsets.GenericViewSet):
             raise serializers.ValidationError({"status": [ESCALATE_INSTEAD_MESSAGE]})
         if new_status == case.status:
             raise serializers.ValidationError({"status": [f"The case is already {case.get_status_display()}."]})
+        if new_status == "archived" and case.status != "closed":
+            raise serializers.ValidationError({"status": [ARCHIVE_CLOSED_ONLY_MESSAGE]})
         old_status = case.status
         with transaction.atomic():
             case.status = new_status
-            case.closed_at = timezone.now() if new_status == "closed" else None
+            # Archiving or restoring to closed keeps the original closing time.
+            case.closed_at = (case.closed_at or timezone.now()) if new_status in Case.DONE_STATUSES else None
             case.save(update_fields=["status", "closed_at", "updated_at"])
             CaseEvent.objects.create(case=case, type=CaseEvent.STATUS_CHANGED, actor=request.user, from_status=old_status, to_status=new_status, detail=note)
             AuditLog.record(
@@ -524,6 +580,83 @@ class CaseViewSet(viewsets.GenericViewSet):
         alerts = list(case.alerts.select_related("assigned_reviewer").order_by("number"))
         result = InvestigationService.build(request.user.organisation, alerts, {"type": "case", "reference": case.reference})
         return Response(InvestigationSerializer(result).data, status=status.HTTP_200_OK)
+
+    def _report(self, request, case):
+        return ReportSerializer(ReportService.gather(case, request.user)).data
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Case evidence summary",
+        description=(
+            "**Export Report quick action (Case detail screen), preview.** One JSON evidence summary of the case, "
+            "the content the PDF and Excel downloads are built from. Read-only; viewing it is not recorded in the "
+            "audit log (downloading a file is).\n\n" + REPORT_NOTE + "\n\n"
+            "**Next for the frontend:** offer `GET .../report/pdf/` and `GET .../report/xlsx/` to download it.\n\n"
+            + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        responses={
+            200: OpenApiResponse(response=ReportSerializer, examples=[OpenApiExample("Report", value=REPORT_EXAMPLE)]),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @action(detail=True, methods=["get"])
+    def report(self, request, reference=None):
+        return Response(self._report(request, self.get_object()), status=status.HTTP_200_OK)
+
+    def _export(self, request, extension, content_type):
+        case = self.get_object()
+        data = self._report(request, case)
+        body = ReportService.pdf(data) if extension == "pdf" else ReportService.xlsx(data)
+        AuditLog.record(
+            AuditLog.CASE_REPORT_EXPORTED, actor=request.user, target=case, request=request,
+            details={"reference": case.reference, "format": extension},
+        )
+        response = HttpResponse(body, content_type=content_type, status=status.HTTP_200_OK)
+        response["Content-Disposition"] = f'attachment; filename="{ReportService.file_name(data, extension)}"'
+        return response
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Download the case report as PDF",
+        description=(
+            "**Export Report, PDF.** The evidence summary as a printable PDF (A4 landscape): case details, transaction "
+            "analysis, related entities, each alert with its explanation and flagged records, evidence list, "
+            "comments, and history, with the case reference and page number on every page.\n\n"
+            + REPORT_NOTE + "\n\n" + EXPORT_NOTE.format(ext="pdf", type="application/pdf") + "\n\n" + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        responses={
+            (200, "application/pdf"): OpenApiResponse(response=OpenApiTypes.BINARY, description="The PDF file."),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @action(detail=True, methods=["get"], url_path="report/pdf")
+    def report_pdf(self, request, reference=None):
+        return self._export(request, "pdf", "application/pdf")
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Download the case report as Excel",
+        description=(
+            "**Export Report, Excel.** The evidence summary as an `.xlsx` workbook with the sheets `Summary` (case "
+            "details and transaction analysis), `Alerts`, `Flagged records` (one row per record, with its alert), "
+            "`Evidence`, `Comments`, and `History`. Text that starts with `=` is stored as text, never as a formula.\n\n"
+            + REPORT_NOTE + "\n\n"
+            + EXPORT_NOTE.format(ext="xlsx", type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            + "\n\n" + AUTH_NOTE
+        ),
+        parameters=[REFERENCE_PARAM],
+        responses={
+            (200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"): OpenApiResponse(
+                response=OpenApiTypes.BINARY, description="The Excel workbook."
+            ),
+            401: UNAUTHORIZED, 403: FORBIDDEN, 404: NOT_FOUND,
+        },
+    )
+    @action(detail=True, methods=["get"], url_path="report/xlsx")
+    def report_xlsx(self, request, reference=None):
+        return self._export(request, "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     @extend_schema(
         tags=["Cases"],
@@ -705,7 +838,7 @@ class CaseViewSet(viewsets.GenericViewSet):
             "files are kept as they are).\n\n"
             "If any field is invalid, nothing changes.\n\n"
             "A case can be escalated again (for example to someone else); the latest escalation is shown in "
-            "`escalation`. A closed case is 400: reopen it first. 200 returns the updated case; show \"Case "
+            "`escalation`. A closed or archived case is 400: reopen or restore it first. 200 returns the updated case; show \"Case "
             "successfully escalated\". Recorded in the history (`escalated`) and the audit log.\n\n" + AUTH_NOTE
         ),
         parameters=[REFERENCE_PARAM],
@@ -731,6 +864,7 @@ class CaseViewSet(viewsets.GenericViewSet):
                 response=OpenApiTypes.OBJECT,
                 examples=[
                     OpenApiExample("Closed case", value={"status": [CLOSED_CASE_MESSAGE]}),
+                    OpenApiExample("Archived case", value={"status": [ARCHIVED_CASE_MESSAGE]}),
                     OpenApiExample("Unknown reason", value={"reason": ['"budget" is not a valid choice.']}),
                     OpenApiExample("Not a member", value={"escalate_to_id": [REVIEWER_INVALID_MESSAGE]}),
                     OpenApiExample("Wrong document type", value={"document_ids": [DOCUMENT_TYPE_MESSAGE]}),
@@ -749,6 +883,8 @@ class CaseViewSet(viewsets.GenericViewSet):
         data = serializer.validated_data
         if case.status == "closed":
             raise serializers.ValidationError({"status": [CLOSED_CASE_MESSAGE]})
+        if case.status == "archived":
+            raise serializers.ValidationError({"status": [ARCHIVED_CASE_MESSAGE]})
         person = _member(request.user.organisation, data["escalate_to_id"])
         if person is None:
             raise serializers.ValidationError({"escalate_to_id": [REVIEWER_INVALID_MESSAGE]})

@@ -161,7 +161,7 @@ class DashboardViewSet(viewsets.GenericViewSet):
             "open_investigations": alerts.filter(status__in=INVESTIGATION_STATUSES).count(),
             "active_cases": InvestigationCase.objects.filter(
                 organisation=request.user.organisation, created_at__gte=self.since(days)
-            ).exclude(status="closed").count(),
+            ).exclude(status__in=InvestigationCase.DONE_STATUSES).count(),
             "risk_exposure": risk_exposure(alerts),
             "alerts_by_severity": {s: by_severity.get(s, 0) for s in SEVERITIES},
             "alerts_by_status": {s: by_status.get(s, 0) for s in STATUSES},

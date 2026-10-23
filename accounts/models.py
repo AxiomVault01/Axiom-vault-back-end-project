@@ -206,6 +206,7 @@ class AuditLog(models.Model):
     CASE_ESCALATED = "case_escalated"
     CASE_EVIDENCE_ADDED = "case_evidence_added"
     CASE_EVIDENCE_REMOVED = "case_evidence_removed"
+    CASE_REPORT_EXPORTED = "case_report_exported"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -244,6 +245,7 @@ class AuditLog(models.Model):
         (CASE_ESCALATED, "Escalated a case"),
         (CASE_EVIDENCE_ADDED, "Added evidence to a case"),
         (CASE_EVIDENCE_REMOVED, "Removed evidence from a case"),
+        (CASE_REPORT_EXPORTED, "Exported a case report"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

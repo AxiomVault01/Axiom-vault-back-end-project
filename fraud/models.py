@@ -140,7 +140,10 @@ class Case(models.Model):
         ("under_review", "Under Review"),
         ("escalated", "Escalated"),
         ("closed", "Closed"),
+        ("archived", "Archived"),
     ]
+    # The case is finished: closed_at is set and the SLA no longer runs.
+    DONE_STATUSES = ("closed", "archived")
     PRIORITY_CHOICES = Alert.SEVERITY_CHOICES
     ESCALATION_REASON_CHOICES = [
         ("financial_threshold", "Exceeds financial approval limit"),
