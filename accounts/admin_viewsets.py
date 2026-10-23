@@ -32,6 +32,7 @@ from .admin_serializers import (
 from .models import AuditLog, Organisation, User
 from .permissions import OWNER_ONLY_MESSAGE, IsAxiomVaultStaff, IsPlatformOwner, PasswordChangeNotRequired
 from .serializers import EMAIL_TAKEN_MESSAGE
+from .throttling import LOGIN_LIMIT, AuthRateLimitMixin, rate_limited
 from .serializers import AdminLoginSerializer, LogoutSerializer
 from .services import (
     INVALID_CREDENTIALS_MESSAGE,
@@ -76,7 +77,7 @@ AdminLoginResponse = inline_serializer(
 )
 
 
-class AdminAuthViewSet(viewsets.ViewSet):
+class AdminAuthViewSet(AuthRateLimitMixin, viewsets.ViewSet):
     """Sign-in for the Admin Control Panel."""
 
     permission_classes = [AllowAny]
@@ -104,7 +105,9 @@ class AdminAuthViewSet(viewsets.ViewSet):
             "- `401`: wrong email or password, or the account is deactivated. Same message either way.\n"
             "- `403` with `code: \"not_admin\"`: the password is right but this is not a staff account. Tell the "
             "person to use the Cooperative app instead.\n"
-            "- `400`: a field is missing or the email is malformed.\n\n"
+            "- `400`: a field is missing or the email is malformed.\n"
+            "- `429`: rate limit. At most 10 sign-in attempts a minute from one IP address, and 10 every 15 minutes "
+            "for one email, counted together with the app's `POST /api/v1/auth/login/`. Wait `retry_after` seconds.\n\n"
             "**Authentication:** none; this is the sign-in."
         ),
         request=AdminLoginSerializer,
@@ -130,6 +133,7 @@ class AdminAuthViewSet(viewsets.ViewSet):
             400: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Missing password", value={"password": ["This field is required."]})]),
             401: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Wrong credentials", value={"error": INVALID_CREDENTIALS_MESSAGE})]),
             403: OpenApiResponse(response=OpenApiTypes.OBJECT, examples=[OpenApiExample("Not staff", value={"error": NOT_ADMIN_MESSAGE, "code": "not_admin"})]),
+            429: rate_limited(LOGIN_LIMIT),
         },
         auth=[],
     )

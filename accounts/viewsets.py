@@ -1,7 +1,4 @@
-import math
-
 from rest_framework import viewsets, status
-from rest_framework.exceptions import Throttled
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
@@ -54,7 +51,18 @@ from .serializers import (
 from django.conf import settings
 from .device import device_info
 from .models import AuditLog, User
-from .throttling import CHANGE_PASSWORD_ATTEMPTS, CHANGE_PASSWORD_WINDOW_SECONDS, ChangePasswordRateThrottle
+from .throttling import (
+    CHANGE_PASSWORD_ATTEMPTS,
+    CHANGE_PASSWORD_WINDOW_SECONDS,
+    CODE_CHECK_LIMIT,
+    CODE_REQUEST_LIMIT,
+    LOGIN_LIMIT,
+    REFRESH_LIMIT,
+    SIGNUP_LIMIT,
+    TOO_MANY_EXAMPLE,
+    AuthRateLimitMixin,
+    rate_limited,
+)
 
 SEND_OTP_SUCCESS_MESSAGE = "OTP verification code transmitted successfully."
 VERIFY_OTP_SUCCESS_MESSAGE = "OTP validation verified successfully."
@@ -178,8 +186,12 @@ def code_request_responses(success_message, success_description):
         ),
         429: OpenApiResponse(
             response=RetryErrorResponse,
-            description="A code was sent to this email less than a minute ago. Retry after `retry_after` seconds.",
-            examples=[OpenApiExample("Too soon", value={"error": CODE_TOO_SOON_MESSAGE, "retry_after": 42})],
+            description=(
+                "A code was sent to this email less than a minute ago, or this IP address reached the rate limit "
+                f"({CODE_REQUEST_LIMIT}). Retry after `retry_after` seconds (also in the `Retry-After` header for the "
+                "rate limit)."
+            ),
+            examples=[OpenApiExample("Too soon", value={"error": CODE_TOO_SOON_MESSAGE, "retry_after": 42}), TOO_MANY_EXAMPLE],
         ),
         503: OpenApiResponse(
             response=ErrorResponse,
@@ -189,7 +201,7 @@ def code_request_responses(success_message, success_description):
     }
 
 
-class AuthViewSet(viewsets.ViewSet):
+class AuthViewSet(AuthRateLimitMixin, viewsets.ViewSet):
     """Account endpoints. Only logout needs a logged-in user; the rest are public."""
 
     serializer_class = SendOTPSerializer
@@ -213,18 +225,6 @@ class AuthViewSet(viewsets.ViewSet):
         if getattr(self, "action", None) in self.AUTHENTICATED_ACTIONS:
             return [IsAuthenticated()]
         return [AllowAny()]
-
-    def get_throttles(self):
-        # Only change-password is limited for now; the other auth endpoints come in feature 11.
-        if getattr(self, "action", None) == "change_password":
-            return [ChangePasswordRateThrottle()]
-        return super().get_throttles()
-
-    def throttled(self, request, wait):
-        # Same body shape as send-otp's 429; DRF still adds the Retry-After header from `wait`.
-        exc = Throttled(wait)
-        exc.detail = {"error": TOO_MANY_ATTEMPTS_TRY_LATER_MESSAGE, "retry_after": math.ceil(wait or 0)}
-        raise exc
 
     @extend_schema(
         tags=["Auth"],
@@ -311,6 +311,7 @@ class AuthViewSet(viewsets.ViewSet):
                     OpenApiExample("No active code", value={"error": NO_ACTIVE_CODE_MESSAGE}),
                 ],
             ),
+            429: rate_limited(CODE_CHECK_LIMIT),
         },
     )
     def verify_otp(self, request):
@@ -446,6 +447,7 @@ class AuthViewSet(viewsets.ViewSet):
                     ),
                 ],
             ),
+            429: rate_limited(SIGNUP_LIMIT),
         },
     )
     def signup(self, request):
@@ -564,6 +566,7 @@ class AuthViewSet(viewsets.ViewSet):
                     OpenApiExample("Wrong sign-in role", value={"error": WRONG_SIGN_IN_ROLE_MESSAGE}),
                 ],
             ),
+            429: rate_limited(LOGIN_LIMIT),
         },
     )
     def login(self, request):
@@ -637,6 +640,7 @@ class AuthViewSet(viewsets.ViewSet):
                 description="Refresh token expired or not usable. Log in again.",
                 examples=[OpenApiExample("Session expired", value={"error": SESSION_EXPIRED_MESSAGE})],
             ),
+            429: rate_limited(REFRESH_LIMIT),
         },
     )
     def token_refresh(self, request):
@@ -694,6 +698,7 @@ class AuthViewSet(viewsets.ViewSet):
                 description="The email could not be queued. No code was created.",
                 examples=[OpenApiExample("Email unavailable", value={"error": DELIVERY_FAILED_MESSAGE})],
             ),
+            429: rate_limited(CODE_REQUEST_LIMIT),
         },
     )
     def forgot_password(self, request):
@@ -760,6 +765,7 @@ class AuthViewSet(viewsets.ViewSet):
                     OpenApiExample("No active code", value={"error": NO_ACTIVE_CODE_MESSAGE}),
                 ],
             ),
+            429: rate_limited(CODE_CHECK_LIMIT),
         },
     )
     def verify_reset_code(self, request):
@@ -841,6 +847,7 @@ class AuthViewSet(viewsets.ViewSet):
                     OpenApiExample("Missing field", value={"new_password": ["This field is required."]}),
                 ],
             ),
+            429: rate_limited(CODE_CHECK_LIMIT),
         },
     )
     def reset_password(self, request):
