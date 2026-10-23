@@ -34,6 +34,16 @@ class FakeStorage:
 
 
 @pytest.fixture(autouse=True)
+def empty_cache():
+    """Rate-limit counts live in the cache; every test starts from zero."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def fake_storage(monkeypatch):
     from config import file_storage
 

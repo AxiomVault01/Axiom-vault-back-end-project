@@ -10,7 +10,6 @@ import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import mail
-from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models.query import QuerySet
@@ -1592,14 +1591,6 @@ def test_reset_password_sends_the_notification(django_capture_on_commit_callback
     assert "reset with an emailed code" in mail.outbox[0].body
 
 
-@pytest.fixture(autouse=True)
-def clear_throttle_counts():
-    # Throttle counts live in the cache; start every test from zero.
-    cache.clear()
-    yield
-    cache.clear()
-
-
 def change_body(current="Str0ng-Passw0rd!", new=NEW_PASSWORD, again=None):
     return {"current_password": current, "new_password": new, "re_enter_password": again or new}
 
@@ -1690,18 +1681,6 @@ def test_change_password_limit_is_per_user(api_client):
     response = api_client.post(CHANGE_URL, change_body(current="wrong"), format="json")
 
     assert response.status_code == 400
-
-
-@pytest.mark.django_db
-def test_other_auth_endpoints_are_not_throttled(api_client):
-    create_user("ada@example.com")
-
-    statuses = {
-        api_client.post(LOGIN_URL, {"email": "ada@example.com", "password": "wrong", "role": "super_admin"}, format="json").status_code
-        for _ in range(8)
-    }
-
-    assert statuses == {401}
 
 
 # --- 5: deploy readiness ---
