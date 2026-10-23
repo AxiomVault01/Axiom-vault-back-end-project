@@ -78,7 +78,7 @@ class CaseListSerializer(serializers.ModelSerializer):
     evidence_count = serializers.SerializerMethodField(help_text="How many evidence files are attached (Evidence column).")
     sla_due_at = serializers.DateTimeField(read_only=True, help_text="When the SLA runs out: created + 2 (critical), 5 (high), 7 (medium), or 14 (low) days.")
     sla_days_remaining = serializers.SerializerMethodField(
-        help_text="Whole days left, rounded up (\"2 days remaining\"); 0 or negative when overdue; `null` once closed."
+        help_text="Whole days left, rounded up (\"2 days remaining\"); 0 or negative when overdue; `null` once closed or archived."
     )
     days_open = serializers.SerializerMethodField(help_text="Whole days since it was opened (until closed, if closed).")
 
@@ -91,7 +91,7 @@ class CaseListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
         extra_kwargs = {
             "title": {"help_text": "Case title."},
-            "status": {"help_text": "`new`, `investigating`, `under_review`, `escalated`, or `closed`."},
+            "status": {"help_text": "`new`, `investigating`, `under_review`, `escalated`, `closed`, or `archived`."},
             "priority": {"help_text": "`critical`, `high`, `medium`, or `low`."},
             "created_at": {"help_text": "When the case was opened (ISO 8601)."},
             "updated_at": {"help_text": "Last change (ISO 8601)."},
@@ -113,7 +113,7 @@ class CaseListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_sla_days_remaining(self, case):
-        if case.status == "closed":
+        if case.status in Case.DONE_STATUSES:
             return None
         return math.ceil((case.sla_due_at - timezone.now()).total_seconds() / 86400)
 
@@ -263,7 +263,8 @@ class CaseCreateSerializer(serializers.Serializer):
 class CaseStatusSerializer(serializers.Serializer):
     status = serializers.ChoiceField(
         choices=CASE_STATUS_VALUES,
-        help_text="`new`, `investigating`, `under_review`, or `closed`. `escalated` is set by the escalate endpoint.",
+        help_text="`new`, `investigating`, `under_review`, `closed`, or `archived` (closed cases only). "
+        "`escalated` is set by the escalate endpoint.",
     )
     note = serializers.CharField(required=False, allow_blank=True, max_length=NOTE_MAX_LENGTH, help_text="Optional reason, saved in the history.")
 

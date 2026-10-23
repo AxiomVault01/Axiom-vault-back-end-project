@@ -45,7 +45,7 @@ class InvestigationService:
             "transactions": InvestigationService._transactions(
                 organisation, [*alerts, *linked], employee_ids, vendors, vendor_ids, accounts
             ),
-            "analysis": InvestigationService._analysis(alerts),
+            "analysis": InvestigationService.analysis(alerts),
             "pattern_detections": [pattern for alert in alerts for pattern in alert.pattern_detections],
             "timeline": sorted(
                 ({**event, "alert": alert.reference} for alert in alerts for event in alert.timeline),
@@ -153,7 +153,8 @@ class InvestigationService:
         return {"count": payments.count() + salaries.count(), "results": results}
 
     @staticmethod
-    def _analysis(alerts):
+    def analysis(alerts):
+        """Transaction analysis numbers over the given alerts, each flagged transaction counted once."""
         exposure, duplicated, seen = Decimal("0"), Decimal("0"), set()
         for alert in alerts:
             amounts = []
