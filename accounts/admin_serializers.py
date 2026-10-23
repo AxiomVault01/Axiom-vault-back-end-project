@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from .models import Organisation
+from .models import AuditLog, Organisation
 from .services import ORGANISATION_TAKEN_MESSAGE
 
 User = get_user_model()
@@ -201,3 +201,109 @@ class AdminUserFilterSerializer(serializers.Serializer):
     account_type = serializers.ChoiceField(choices=["super_admin", "team_member"], required=False)
     is_active = serializers.BooleanField(required=False, allow_null=True, default=None)
     search = serializers.CharField(required=False)
+
+
+class AuditActorSerializer(serializers.Serializer):
+    id = serializers.UUIDField(allow_null=True, help_text="The user's ID, or `null` if the account was deleted.")
+    email = serializers.CharField(help_text="Their email when it happened (kept after the account is deleted). Empty for system actions.")
+    full_name = serializers.CharField(allow_null=True, help_text="Their current name, or `null` if the account was deleted.")
+
+
+class AuditOrganisationSerializer(serializers.Serializer):
+    id = serializers.UUIDField(allow_null=True, help_text="The organisation's ID, or `null` if it was deleted.")
+    name = serializers.CharField(help_text="Its name when it happened (kept after it is deleted).")
+
+
+class AuditLogEntrySerializer(serializers.ModelSerializer):
+    """One audit log row as the Audit Log screen shows it."""
+
+    action_label = serializers.CharField(source="get_action_display", help_text="Readable action, e.g. `Logged in`.")
+    actor = serializers.SerializerMethodField(help_text="Who did it: `{id, email, full_name}`, or `null` for system actions (detection).")
+    organisation = serializers.SerializerMethodField(help_text="`{id, name}` of the Cooperative, or `null` for platform actions (staff, admin panel).")
+
+    class Meta:
+        model = AuditLog
+        fields = [
+            "id", "sequence", "created_at", "action", "action_label", "actor", "organisation", "target_type", "target_id",
+            "details", "ip_address", "previous_hash", "hash",
+        ]
+        read_only_fields = fields
+        extra_kwargs = {
+            "id": {"help_text": "The entry's ID."},
+            "sequence": {"help_text": "Position in the log: 1, 2, 3, ... with no gaps."},
+            "created_at": {"help_text": "When it happened (ISO 8601, UTC)."},
+            "action": {"help_text": "Action code, e.g. `login`. `GET .../audit-log/actions/` lists them all."},
+            "target_type": {"help_text": "Kind of record acted on, e.g. `user`, `case`, `alert`, `dataupload`; empty if none."},
+            "target_id": {"help_text": "ID of that record; empty if none."},
+            "details": {"help_text": "Small facts about the action, e.g. `{\"reference\": \"CASE-0001\"}`. Never passwords or tokens."},
+            "ip_address": {"help_text": "The caller's IP address, or `null` (system actions, unknown)."},
+            "previous_hash": {"help_text": "`hash` of the entry before it (empty for entry 1)."},
+            "hash": {"help_text": "SHA-256 of this entry's content and `previous_hash`; what verify checks."},
+        }
+
+    @extend_schema_field(AuditActorSerializer(allow_null=True))
+    def get_actor(self, row):
+        if row.actor_id is None and not row.actor_email:
+            return None
+        return {
+            "id": str(row.actor_id) if row.actor_id else None,
+            "email": row.actor_email,
+            "full_name": row.actor.full_name if row.actor_id else None,
+        }
+
+    @extend_schema_field(AuditOrganisationSerializer(allow_null=True))
+    def get_organisation(self, row):
+        if row.organisation_id is None and not row.organisation_name:
+            return None
+        return {"id": str(row.organisation_id) if row.organisation_id else None, "name": row.organisation_name}
+
+
+class AuditLogFilterSerializer(serializers.Serializer):
+    """Checks the Audit Log list and export query parameters."""
+
+    action = serializers.ChoiceField(choices=[value for value, _ in AuditLog.ACTION_CHOICES], required=False)
+    organisation = serializers.CharField(required=False)
+    actor = serializers.UUIDField(required=False)
+    target_type = serializers.CharField(required=False, max_length=50)
+    target_id = serializers.CharField(required=False, max_length=64)
+    date_from = serializers.DateField(required=False)
+    date_to = serializers.DateField(required=False)
+    search = serializers.CharField(required=False, max_length=254)
+
+    def validate_organisation(self, value):
+        if value == "none":
+            return value
+        try:
+            return str(serializers.UUIDField().to_internal_value(value))
+        except serializers.ValidationError:
+            raise serializers.ValidationError("Use an organisation ID or `none`.")
+
+    def validate(self, data):
+        if data.get("date_from") and data.get("date_to") and data["date_from"] > data["date_to"]:
+            raise serializers.ValidationError({"date_to": ["Must be on or after date_from."]})
+        return data
+
+
+class AuditActionSerializer(serializers.Serializer):
+    value = serializers.CharField(help_text="Action code to send as `?action=`.")
+    label = serializers.CharField(help_text="Readable name for the dropdown.")
+
+
+class AuditProblemSerializer(serializers.Serializer):
+    sequence = serializers.IntegerField(help_text="Sequence of the first entry that fails (or the first missing one).")
+    id = serializers.UUIDField(allow_null=True, help_text="That entry's ID, or `null` when the entry is missing.")
+    reason = serializers.ChoiceField(
+        choices=["altered", "missing", "broken_link"],
+        help_text="`altered`: its content no longer matches its hash. `missing`: entries were deleted (a gap, or "
+        "entries missing at the end). `broken_link`: its `previous_hash` does not match the entry before it.",
+    )
+    detail = serializers.CharField(help_text="One sentence saying what was found.")
+
+
+class AuditVerifySerializer(serializers.Serializer):
+    valid = serializers.BooleanField(help_text="`true` when the whole chain is intact.")
+    checked = serializers.IntegerField(help_text="How many entries passed before the first problem (all of them when valid).")
+    last_sequence = serializers.IntegerField(help_text="Sequence of the last entry checked.")
+    last_hash = serializers.CharField(help_text="Hash of the last entry checked. Write it down to compare later checks against.")
+    problem = AuditProblemSerializer(allow_null=True, help_text="The first problem found, or `null`.")
+    verified_at = serializers.DateTimeField(help_text="When this check ran.")

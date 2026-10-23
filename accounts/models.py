@@ -1,8 +1,15 @@
+import hashlib
+import ipaddress
+import json
 import uuid
+from datetime import timezone as dt_timezone
+
 from django.contrib.auth.models import AbstractUser
-from django.db import models
+from django.db import models, transaction
 from django.core.exceptions import PermissionDenied
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models.functions import Lower
+from django.utils import timezone
 
 from .device import UNKNOWN_IP, client_ip
 
@@ -165,6 +172,43 @@ class AuditLogQuerySet(models.QuerySet):
     def delete(self):
         raise PermissionDenied("Audit log rows cannot be deleted.")
 
+    def bulk_create(self, objs, *args, **kwargs):
+        # bulk_create skips save(), so the rows would not join the hash chain.
+        raise PermissionDenied("Audit log rows must be added one at a time.")
+
+
+class AuditChain(models.Model):
+    """The single row holding the audit log chain's newest sequence and hash. Locked while a row is added."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    last_sequence = models.PositiveBigIntegerField(default=0)
+    last_hash = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        db_table = "audit_chain"
+
+
+def audit_hash(row) -> str:
+    """SHA-256 of a row's content and the previous row's hash. Used both to write and to verify the chain."""
+    ip = str(ipaddress.ip_address(row.ip_address)) if row.ip_address else None
+    content = {
+        "id": str(row.id),
+        "sequence": row.sequence,
+        "created_at": row.created_at.astimezone(dt_timezone.utc).isoformat(),
+        "action": row.action,
+        "actor_id": str(row.actor_id) if row.actor_id else None,
+        "actor_email": row.actor_email,
+        "organisation_id": str(row.organisation_id) if row.organisation_id else None,
+        "organisation_name": row.organisation_name,
+        "target_type": row.target_type,
+        "target_id": row.target_id,
+        "details": row.details,
+        "ip_address": ip,
+        "previous_hash": row.previous_hash,
+    }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False, cls=DjangoJSONEncoder)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
 
 class AuditLog(models.Model):
     """One append-only row per important action: who, in which organisation, what, to what, when."""
@@ -207,6 +251,7 @@ class AuditLog(models.Model):
     CASE_EVIDENCE_ADDED = "case_evidence_added"
     CASE_EVIDENCE_REMOVED = "case_evidence_removed"
     CASE_REPORT_EXPORTED = "case_report_exported"
+    AUDIT_LOG_EXPORTED = "audit_log_exported"
     ACTION_CHOICES = [
         (SIGNUP, "Signed up"),
         (LOGIN, "Logged in"),
@@ -246,10 +291,15 @@ class AuditLog(models.Model):
         (CASE_EVIDENCE_ADDED, "Added evidence to a case"),
         (CASE_EVIDENCE_REMOVED, "Removed evidence from a case"),
         (CASE_REPORT_EXPORTED, "Exported a case report"),
+        (AUDIT_LOG_EXPORTED, "Exported the audit log"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Set before saving (not auto_now_add) because it is part of the hash.
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+    sequence = models.PositiveBigIntegerField(unique=True, editable=False, help_text="1, 2, 3, ... in the order rows were added.")
+    previous_hash = models.CharField(max_length=64, blank=True, default="", editable=False)
+    hash = models.CharField(max_length=64, editable=False)
     action = models.CharField(max_length=50, choices=ACTION_CHOICES)
     # The copies keep a row meaningful after the user or organisation is deleted.
     actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
@@ -276,7 +326,15 @@ class AuditLog(models.Model):
     def save(self, *args, **kwargs):
         if not self._state.adding:
             raise PermissionDenied("Audit log rows cannot be changed.")
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            # One writer at a time, so every row links to the one before it.
+            head, _ = AuditChain.objects.select_for_update().get_or_create(pk=1)
+            self.sequence = head.last_sequence + 1
+            self.previous_hash = head.last_hash
+            self.hash = audit_hash(self)
+            super().save(*args, **kwargs)
+            head.last_sequence, head.last_hash = self.sequence, self.hash
+            head.save(update_fields=["last_sequence", "last_hash"])
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied("Audit log rows cannot be deleted.")

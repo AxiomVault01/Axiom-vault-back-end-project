@@ -1,6 +1,7 @@
 from django.urls import path
 from rest_framework.routers import SimpleRouter
 
+from .admin_audit_viewsets import AuditLogAdminViewSet
 from .admin_viewsets import (
     AdminAuthViewSet,
     AdminLogoutViewSet,
@@ -15,6 +16,7 @@ router.register("organisations", OrganisationAdminViewSet, basename="admin-organ
 router.register("users", AdminUserViewSet, basename="admin-user")
 router.register("staff", StaffAdminViewSet, basename="admin-staff")
 router.register("roles", RolesViewSet, basename="admin-roles")
+router.register("audit-log", AuditLogAdminViewSet, basename="admin-audit-log")
 
 urlpatterns = [
     path("auth/login/", AdminAuthViewSet.as_view({"post": "login"}), name="admin-login"),

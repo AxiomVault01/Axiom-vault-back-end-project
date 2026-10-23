@@ -21,7 +21,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
-from .models import OTP, Organisation, User
+from .models import OTP, AuditChain, AuditLog, Organisation, User, audit_hash
 from .serializers import EMAIL_TAKEN_MESSAGE
 from .tasks import send_otp_email_task, send_password_changed_email_task
 
@@ -691,3 +691,41 @@ class AdminAccountService:
                 OTPService.generate(user.email, purpose="password_reset", lifetime=RESET_CODE_LIFETIME)
         except OperationalError:
             raise CodeDeliveryUnavailable()
+
+
+class AuditLogService:
+    @staticmethod
+    def verify() -> dict:
+        """Walks the audit log in sequence order and reports the first row that breaks the hash chain."""
+        head = AuditChain.objects.filter(pk=1).first()
+        expected_sequence, previous_hash, checked = 1, "", 0
+        problem = None
+        for row in AuditLog.objects.order_by("sequence").iterator(chunk_size=2000):
+            if row.sequence != expected_sequence:
+                problem = _chain_problem(row, "missing", f"Rows {expected_sequence} to {row.sequence - 1} are missing.")
+            elif row.previous_hash != previous_hash:
+                problem = _chain_problem(row, "broken_link", "Its previous_hash does not match the row before it.")
+            elif audit_hash(row) != row.hash:
+                problem = _chain_problem(row, "altered", "Its content no longer matches its hash.")
+            if problem:
+                break
+            checked += 1
+            expected_sequence, previous_hash = row.sequence + 1, row.hash
+        last_sequence = expected_sequence - 1
+        if problem is None and head is not None and head.last_sequence > last_sequence:
+            problem = {
+                "sequence": last_sequence + 1, "id": None, "reason": "missing",
+                "detail": f"Rows {last_sequence + 1} to {head.last_sequence} are missing from the end of the log.",
+            }
+        return {
+            "valid": problem is None,
+            "checked": checked,
+            "last_sequence": last_sequence,
+            "last_hash": previous_hash,
+            "problem": problem,
+            "verified_at": timezone.now(),
+        }
+
+
+def _chain_problem(row, reason, detail):
+    return {"sequence": row.sequence, "id": str(row.id), "reason": reason, "detail": f"Row {row.sequence}: {detail}"}
