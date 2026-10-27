@@ -24,9 +24,13 @@ UPLOAD_URL = "/api/v1/ingestion/upload-payroll/"
 PERIOD = {"pay_period_start": "2026-01-01", "pay_period_end": "2026-12-31"}
 HEADERS = [
     "employee_id", "employee_name", "department", "salary_basic", "net_salary",
-    "account_number", "payment_date", "role", "approver_id",
+    "account_number", "payment_date", "role", "approver_id", "attendance_days", "employment_status",
 ]
-GOOD_ROW = ["EMP001", "Ada Obi", "Operations", "250,000.00", "230000", "0123456789", "28/09/2026", "Payroll Analyst", "APR-01"]
+GOOD_ROW = ["EMP001", "Ada Obi", "Operations", "250,000.00", "230000", "0123456789", "28/09/2026", "Payroll Analyst", "APR-01", "22", "Active"]
+# Required payroll columns after employee_id and employee_name, in schema order.
+REQUIRED_AFTER_NAME = [
+    "department", "role", "account_number", "net_salary", "payment_date", "attendance_days", "employment_status", "approver_id",
+]
 
 
 def csv_file(rows, headers=HEADERS, name="payroll.csv", encoding="utf-8"):
@@ -100,7 +104,8 @@ def test_empty_or_broken_files_are_refused():
 def test_aliases_and_letter_case_map_to_standard_fields():
     standardiser = Standardiser(
         PAYROLL_SCHEMA,
-        ["Staff ID", "Full Name", "DEPT", "Basic Salary", "Net-Pay", "Account No", "Pay Date", "Remarks", "Branch", "Position", "Approver ID"]
+        ["Staff ID", "Full Name", "DEPT", "Basic Salary", "Net-Pay", "Account No", "Pay Date", "Remarks", "Branch", "Position", "Approver ID",
+         "Days Present", "Status"]
     )
 
     assert standardiser.missing_columns == []
@@ -112,7 +117,7 @@ def test_aliases_and_letter_case_map_to_standard_fields():
 def test_missing_required_columns_are_listed():
     standardiser = Standardiser(PAYROLL_SCHEMA, ["employee_id", "employee_name"])
 
-    assert standardiser.missing_columns == ["department", "role", "account_number", "net_salary", "payment_date", "approver_id"]
+    assert standardiser.missing_columns == REQUIRED_AFTER_NAME
 
 
 def test_a_good_row_becomes_typed_values():
@@ -177,13 +182,14 @@ def test_invalid_values_are_reported_per_field(index, value, message):
 
 
 def test_optional_fields_default_and_check():
-    headers = HEADERS + ["allowances", "deductions", "attendance_days", "leave_days"]
+    headers = HEADERS + ["allowances", "deductions", "leave_days"]
+    bad_attendance = GOOD_ROW[:9] + ["2.5"] + GOOD_ROW[10:]
     _, [(blank, blank_errors), (bad, bad_errors)] = standardise(
-        [GOOD_ROW + ["", "", "", ""], GOOD_ROW + ["-5", "1", "2.5", "-1"]], headers
+        [GOOD_ROW + ["", "", ""], bad_attendance + ["-5", "1", "-1"]], headers
     )
 
     assert blank_errors == []
-    assert blank["allowances"] == Decimal("0") and blank["attendance_days"] is None
+    assert blank["allowances"] == Decimal("0") and blank["leave_days"] is None
     assert sorted(f for f, _ in bad_errors) == ["allowances", "attendance_days", "leave_days"]
 
 
@@ -237,8 +243,8 @@ def test_csv_upload_saves_every_row_for_the_organisation(uploader):
 
 
 def test_xlsx_upload_with_aliases_and_extra_columns(uploader):
-    headers = ["Staff ID", "Name", "Dept", "Basic", "Net Pay", "Account No", "Pay Date", "Remarks", "Job Title", "Approved By"]
-    row = ["EMP9", "Bola", "Finance", 300000, 280000, "0011223344", datetime(2026, 9, 30), "ok", "Accountant", "APR-02"]
+    headers = ["Staff ID", "Name", "Dept", "Basic", "Net Pay", "Account No", "Pay Date", "Remarks", "Job Title", "Approved By", "Attendance", "Employee Status"]
+    row = ["EMP9", "Bola", "Finance", 300000, 280000, "0011223344", datetime(2026, 9, 30), "ok", "Accountant", "APR-02", 21, "Active"]
 
     response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": xlsx_file([row], headers)}, format="multipart")
 
@@ -265,7 +271,7 @@ def test_one_bad_row_saves_nothing(uploader):
 
 
 def test_only_the_first_hundred_errors_are_returned(uploader):
-    rows = [[f"E{i}", "A", "B", "x", "1", "1", "2026-01-01", "Clerk", "APR-01"] for i in range(150)]
+    rows = [[f"E{i}", "A", "B", "x", "1", "1", "2026-01-01", "Clerk", "APR-01", "20", "Active"] for i in range(150)]
 
     body = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file(rows)}, format="multipart").json()
 
@@ -293,7 +299,7 @@ def test_missing_columns_are_named(uploader):
         UPLOAD_URL, {**PERIOD, "file": csv_file([GOOD_ROW[:2]], headers=["employee_id", "employee_name"])}, format="multipart"
     ).json()
 
-    assert body["missing_columns"] == ["department", "role", "account_number", "net_salary", "payment_date", "approver_id"]
+    assert body["missing_columns"] == REQUIRED_AFTER_NAME
 
 
 def test_no_file_gets_400(uploader):
@@ -598,10 +604,31 @@ def test_the_frontend_template_uploads(uploader):
     assert second.employment_status == "Exited" and second.exit_date == date(2026, 9, 30)
 
 
-def test_template_cells_may_be_blank_except_exit_date_for_leavers(uploader):
-    ok = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([template_row(status="", attendance="")], TEMPLATE_HEADERS)}, format="multipart")
-    assert ok.status_code == 201
+def test_blank_attendance_or_status_is_a_row_error(uploader):
+    rows = [template_row("EMP001", attendance=""), template_row("EMP002", status=""), template_row("EMP003")]
 
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file(rows, TEMPLATE_HEADERS)}, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["validation_errors"] == [
+        {"row": 2, "field": "attendance_days", "error": "This value is required."},
+        {"row": 3, "field": "employment_status", "error": "This value is required."},
+    ]
+    assert not Payroll.objects.exists()
+
+
+@pytest.mark.parametrize("header, field", [("Attendance Days", "attendance_days"), ("Employment Status", "employment_status")])
+def test_attendance_and_status_columns_are_required(uploader, header, field):
+    headers = [h for h in TEMPLATE_HEADERS if h != header]
+    row = [cell for h, cell in zip(TEMPLATE_HEADERS, template_row()) if h != header]
+
+    response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([row], headers)}, format="multipart")
+
+    assert response.status_code == 400
+    assert response.json()["missing_columns"] == [field]
+
+
+def test_exit_date_is_required_for_leavers(uploader):
     for status in ("Exited", "terminated", "RESIGNED"):
         response = client_for(uploader).post(UPLOAD_URL, {**PERIOD, "file": csv_file([template_row("EMP009", status)], TEMPLATE_HEADERS)}, format="multipart")
         body = response.json()

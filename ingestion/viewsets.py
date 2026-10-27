@@ -293,7 +293,8 @@ class IngestionViewSet(viewsets.ViewSet):
         "payroll",
         "One row per employee per pay period. Follows the frontend's payroll template: Employee ID, Full Name, "
         "Department, Position, Bank Account Number, Salary Amount (the net salary paid), Payment Date, Attendance "
-        "Days, Employment Status, Exit Date, Approver ID (required on every row).",
+        "Days, Employment Status, Exit Date, Approver ID. Every column except Exit Date is required, with a value on "
+        "every row (Attendance Days and Employment Status since 2026-10-23).",
         [
             {"row": 5, "field": "net_salary", "error": "The amount cannot be negative."},
             {"row": 9, "field": "payment_date", "error": "Use a date like 2026-09-28 or 28/09/2026."},

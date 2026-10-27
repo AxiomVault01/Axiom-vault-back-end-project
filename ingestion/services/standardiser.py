@@ -65,7 +65,7 @@ def payroll_row_check(values: dict) -> list[tuple[str, str]]:
 
 # Follows the frontend's "Required Columns (payroll)" template (2026-10-22): Employee ID, Full Name,
 # Department, Position, Bank Account Number, Salary Amount (net salary), Payment Date, Attendance Days,
-# Employment Status, Exit Date, Approver ID (required). The pay period is not a column: the uploader sets it
+# Employment Status, Exit Date, Approver ID. All but Exit Date are required. The pay period is not a column: the uploader sets it
 # as a date range with the upload (client decision 2026-10-22).
 PAYROLL_SCHEMA = UploadSchema(
     kind="payroll",
@@ -84,14 +84,15 @@ PAYROLL_SCHEMA = UploadSchema(
         "allowances": money(aliases=["allowance"], blank=Decimal("0")),
         "deductions": money(aliases=["deduction"], blank=Decimal("0")),
         "bank_name": text(100, aliases=["bank"]),
-        "attendance_days": Field("count", aliases=("days_present", "attendance")),
+        # Required on every row, for now (client, 2026-10-23).
+        "attendance_days": Field("count", required=True, aliases=("days_present", "attendance")),
         "leave_days": Field("count", aliases=("days_on_leave",)),
         "location": text(100, aliases=["branch"]),
         "supervisor_id": text(100, aliases=["supervisor"]),
         "employment_type": text(50, aliases=["contract_type"]),
         "grade_level": text(50, aliases=["grade", "level"]),
-        # Blank cells become "" (the columns store empty text, not null).
-        "employment_status": Field("text", max_length=50, aliases=("status", "employee_status"), blank=""),
+        # Required on every row, for now (client, 2026-10-23).
+        "employment_status": text(50, True, ["status", "employee_status"]),
         "exit_date": Field("date", aliases=("date_of_exit", "exit", "date_left")),
         # Required on every row (decided 2026-10-22): who approved the payment.
         "approver_id": text(100, True, ["approver", "approved_by"]),
